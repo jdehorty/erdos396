@@ -1,0 +1,78 @@
+[package]
+name = "erdos396"
+version = "1.0.0"
+edition = "2021"
+authors = ["Erdős 396 Research Team"]
+description = "High-performance search for Erdős Problem #396 witnesses via Governor Set analysis"
+license = "MIT"
+repository = "https://github.com/jdehorty/erdos396"
+keywords = ["number-theory", "erdos", "combinatorics", "parallel"]
+categories = ["mathematics", "science"]
+
+[lib]
+name = "erdos396"
+path = "src/lib.rs"
+
+[[bin]]
+name = "erdos396"
+path = "src/main.rs"
+
+[[bin]]
+name = "verify"
+path = "src/bin/verify.rs"
+
+[dependencies]
+# Parallelism
+rayon = "1.10"
+num_cpus = "1.16"
+
+# Small vector optimization
+smallvec = "1.13"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Serialization for checkpoints
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Progress display
+indicatif = { version = "0.17", features = ["rayon"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[profile.dev]
+opt-level = 1  # Faster dev builds with some optimization
+
+[profile.release]
+opt-level = 3
+lto = "fat"              # Full link-time optimization
+codegen-units = 1        # Better optimization (single codegen unit)
+panic = "abort"          # Smaller binary, no unwinding
+strip = true             # Strip symbols
+debug = false
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+strip = false
+
+# Profile for server deployment — maximum performance
+[profile.server]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

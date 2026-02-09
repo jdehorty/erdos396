@@ -1,0 +1,33 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Cargo lock for library crates (keep for binaries — this is a binary crate)
+# Cargo.lock is intentionally tracked
+
+# Checkpoint files (generated at runtime)
+checkpoints/
+checkpoint_*.json
+
+# OS metadata
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+
+# Claude Code / Codex tooling (not part of this project)
+.claude/
+.codex/
+
+# Environment and secrets
+.env
+.env.*
+
+# Logs
+*.log
