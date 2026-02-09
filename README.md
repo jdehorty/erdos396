@@ -44,20 +44,27 @@ cargo run --release --bin verify -- -k 8 -n 339949252
 cargo run --release --bin verify -- --known
 ```
 
-## Known Witnesses (OEIS A375077)
+## Known Witnesses
 
-| k  | Smallest witness n | Notes |
-|----|-------------------|-------|
-| 1  | 2                 |       |
-| 2  | 2,480             |       |
-| 3  | 8,178             |       |
-| 4  | 45,153            |       |
-| 5  | 3,648,841         |       |
-| 6  | 7,979,090         |       |
-| 7  | 101,130,029       |       |
-| 8  | 339,949,252       |       |
-| 9  | 17,609,764,993    | Run of 11 consecutive governors |
-| 10 | 17,609,764,994    | Same run of 11 |
+The official sequence is OEIS [A375077](https://oeis.org/A375077) ([b-file](https://oeis.org/A375077/b375077.txt)), which currently lists k=1 through k=7:
+
+| k | Smallest witness n | Source |
+|---|-------------------|--------|
+| 1 | 2                 | OEIS   |
+| 2 | 2,480             | OEIS   |
+| 3 | 8,178             | OEIS   |
+| 4 | 45,153            | OEIS   |
+| 5 | 3,648,841         | OEIS   |
+| 6 | 7,979,090         | OEIS   |
+| 7 | 101,130,029       | OEIS   |
+
+The following witnesses were discovered using this tool and have not yet been added to the OEIS:
+
+| k  | Smallest witness n | Source | Notes |
+|----|-------------------|--------|-------|
+| 8  | 339,949,252       | This project |  |
+| 9  | 17,609,764,993    | This project | Found 2025-01-20; run of 11 consecutive governors |
+| 10 | 17,609,764,994    | This project | Found 2025-01-20; same run of 11 |
 
 ## Architecture
 
