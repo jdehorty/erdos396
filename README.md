@@ -75,7 +75,7 @@ in a single pass, then detects consecutive governor runs and verifies them:
 graph TD
     A["Input: batch of numbers<br/>[n, n+1, ..., n+batch_size)"] --> B
 
-    subgraph FUSED["Fused Sieve Pass &mdash; single traversal per batch"]
+    subgraph FUSED["Fused Sieve Pass"]
         direction TB
         B{"n is odd prime?"}
         B -- "Yes (4.3%)" --> R1["Reject"]
