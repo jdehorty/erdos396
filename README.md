@@ -79,7 +79,7 @@ graph TD
         direction TB
         B{"n is odd prime?"}
         B -- "Yes (4.3%)" --> R1["Reject"]
-        B -- No --> C["Divide out small primes p,<br/>check v_p via Kummer's theorem"]
+        B -- No --> C["Divide out small primes p,<br/>check v_p via Kummer's"]
         C --> D{"v_p(C(2n,n)) &ge; v_p(n)<br/>for all small p?"}
         D -- "No (25.8%)" --> R2["Reject"]
         D -- Yes --> E{"Cofactor after sieve > 1?<br/>(large prime factor > &radic;2n)"}
