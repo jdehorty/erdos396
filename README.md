@@ -62,7 +62,7 @@ The following witnesses were discovered using this tool and have not yet been ad
 
 | k  | Smallest witness n | Source | Notes |
 |----|-------------------|--------|-------|
-| 8  | 339,949,252       | This project |  |
+| 8  | 339,949,252       | This project | Found 2025-01-17 |
 | 9  | 17,609,764,993    | This project | Found 2025-01-20; run of 11 consecutive governors |
 | 10 | 17,609,764,994    | This project | Found 2025-01-20; same run of 11 |
 
