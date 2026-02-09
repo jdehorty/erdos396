@@ -66,16 +66,58 @@ The following witnesses were discovered using this tool and have not yet been ad
 | 9  | 17,609,764,993    | This project | Found 2025-01-20; run of 11 consecutive governors |
 | 10 | 17,609,764,994    | This project | Found 2025-01-20; same run of 11 |
 
+## How It Works
+
+The search pipeline uses a fused sieve+governor computation to reject ~87% of candidates
+in a single pass, then detects consecutive governor runs and verifies them:
+
+```mermaid
+graph TD
+    A["Input: batch of numbers<br/>[n, n+1, ..., n+batch_size)"] --> B
+
+    subgraph FUSED["Fused Sieve Pass &mdash; single traversal per batch"]
+        direction TB
+        B{"n is odd prime?"}
+        B -- "Yes (4.3%)" --> R1["Reject"]
+        B -- No --> C["Divide out small primes p,<br/>check v_p via Kummer's theorem"]
+        C --> D{"v_p(C(2n,n)) &ge; v_p(n)<br/>for all small p?"}
+        D -- "No (25.8%)" --> R2["Reject"]
+        D -- Yes --> E{"Cofactor after sieve > 1?<br/>(large prime factor > &radic;2n)"}
+        E -- "Yes (57.2%)" --> R3["Reject"]
+        E -- No --> G["Governor &check;"]
+    end
+
+    G --> H{"Run of k+1<br/>consecutive<br/>governors?"}
+    H -- No --> I["Continue scanning"]
+    H -- Yes --> J["Full p-adic<br/>verification"]
+    J --> K{"All primes<br/>satisfied?"}
+    K -- No --> L["False positive"]
+    K -- Yes --> M["Witness found"]
+
+    style FUSED fill:#1a1a2e,stroke:#e94560,stroke-width:2px,color:#eee
+    style G fill:#0f3460,stroke:#16c79a,color:#eee
+    style M fill:#0f3460,stroke:#16c79a,stroke-width:3px,color:#eee
+    style R1 fill:#1a1a2e,stroke:#e94560,color:#999
+    style R2 fill:#1a1a2e,stroke:#e94560,color:#999
+    style R3 fill:#1a1a2e,stroke:#e94560,color:#999
+    style L fill:#1a1a2e,stroke:#e94560,color:#999
+```
+
+Only ~12.6% of candidates survive the fused sieve (matching the Ford–Konyagin governor density).
+Kummer's theorem replaces Legendre's formula for computing v_p(C(2n,n)), halving the number of
+iterations per prime — and for p=2 it reduces to a single `POPCNT` instruction.
+
 ## Architecture
 
 | File | Purpose |
 |------|---------|
 | `sieve.rs` | Prime sieve (Sieve of Eratosthenes) |
 | `factor.rs` | Integer factorization via trial division |
-| `governor.rs` | Governor Set membership checking |
+| `governor.rs` | Governor Set membership checking via Kummer's theorem |
+| `prefilter.rs` | Fused sieve+governor batch computation (performance-critical hot loop) |
 | `verify.rs` | Full witness verification with p-adic analysis |
-| `search.rs` | Parallel search for Governor runs |
-| `checkpoint.rs` | Checkpoint management for long-running searches |
+| `search.rs` | Parallel search with rayon, run detection, checkpointing |
+| `checkpoint.rs` | Checkpoint save/resume for long-running searches |
 
 ## Checkpoints
 
