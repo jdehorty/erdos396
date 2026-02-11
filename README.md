@@ -48,23 +48,22 @@ cargo run --release --bin verify -- --known
 
 The official sequence is OEIS [A375077](https://oeis.org/A375077) ([b-file](https://oeis.org/A375077/b375077.txt)), which currently lists k=1 through k=7:
 
-| k | Smallest witness n | Source |
-|---|-------------------|--------|
-| 1 | 2                 | OEIS   |
-| 2 | 2,480             | OEIS   |
-| 3 | 8,178             | OEIS   |
-| 4 | 45,153            | OEIS   |
-| 5 | 3,648,841         | OEIS   |
-| 6 | 7,979,090         | OEIS   |
-| 7 | 101,130,029       | OEIS   |
+| k  | Smallest witness n   | Status            |
+|----|---------------------|-------------------|
+| 1  | 2                   | Known (OEIS)      |
+| 2  | 2,480               | Known (OEIS)      |
+| 3  | 8,178               | Known (OEIS)      |
+| 4  | 45,153              | Known (OEIS)      |
+| 5  | 3,648,841           | Known (OEIS)      |
+| 6  | 7,979,090           | Known (OEIS)      |
+| 7  | 101,130,029         | Known (OEIS)      |
+| 8  | 339,949,252         | Found 2025-01-17  |
+| 9  | 17,609,764,993      | Found 2025-01-20  |
+| 10 | 17,609,764,994      | Found 2025-01-20  |
+| 11 | 1,070,858,041,585   | Found 2026-02-09  |
+| 12 | 5,048,891,644,646   | Found 2026-02-11  |
 
-The following witnesses were discovered using this tool and have not yet been added to the OEIS:
-
-| k  | Smallest witness n | Source | Notes |
-|----|-------------------|--------|-------|
-| 8  | 339,949,252       | This project | Found 2025-01-17 |
-| 9  | 17,609,764,993    | This project | Found 2025-01-20; run of 11 consecutive governors |
-| 10 | 17,609,764,994    | This project | Found 2025-01-20; same run of 11 |
+Witnesses for k=8 through k=12 were discovered using this project and have not yet been added to the OEIS.
 
 ## How It Works
 
