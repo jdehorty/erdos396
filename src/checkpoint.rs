@@ -2,13 +2,24 @@
 //!
 //! Provides automatic checkpointing at configurable intervals,
 //! allowing searches to be paused and resumed.
+//!
+//! ## v3 Architecture (2026-02-19)
+//!
+//! Checkpoint files are decoupled from statistical run logs:
+//! - **Checkpoint file** (`checkpoint_k{K}_w{NN}.json`): Small (~500 bytes),
+//!   overwritten atomically each cycle. Contains only resumable state.
+//! - **Run log** (`runs_k{K}_w{NN}.jsonl`): Append-only, one JSON line per
+//!   significant run. Each run written once when discovered, never rewritten.
+//!
+//! This eliminates the I/O bottleneck caused by v2's cumulative snapshots,
+//! which grew to 34+ MB as significant_runs accumulated.
 
 use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 /// Checkpoint data for a search worker.
@@ -57,6 +68,7 @@ pub struct Checkpoint {
     pub run_distribution: HashMap<usize, u64>,
 
     /// All significant runs found (runs of length >= significant_run_threshold)
+    /// In v3, this is kept empty in the checkpoint file; runs are in the run log.
     #[serde(default)]
     pub significant_runs: Vec<RunInfo>,
 
@@ -89,7 +101,7 @@ pub struct Checkpoint {
 }
 
 fn default_version() -> u32 {
-    2  // Bumped for new statistics fields
+    3  // v3: decoupled run logging
 }
 
 fn default_significant_threshold() -> usize {
@@ -166,25 +178,30 @@ impl Checkpoint {
             safety_net_alerts: 0,
             timestamp: Utc::now(),
             worker_id: None,
-            version: 2,
+            version: 3,
         }
     }
 
-    /// Record a run in the distribution and optionally as a significant run.
-    pub fn record_run(&mut self, start: u64, length: usize) {
+    /// Record a run in the distribution. Returns the RunInfo if significant.
+    ///
+    /// In v3, significant runs are NOT stored in the checkpoint.
+    /// The caller is responsible for logging them via RunLogger.
+    pub fn record_run(&mut self, start: u64, length: usize) -> Option<RunInfo> {
         // Always update distribution for runs of 2+
         if length >= 2 {
             *self.run_distribution.entry(length).or_insert(0) += 1;
         }
 
-        // Record significant runs individually
+        // Return RunInfo for significant runs (caller logs to RunLogger)
         if length >= self.significant_run_threshold {
-            self.significant_runs.push(RunInfo {
+            Some(RunInfo {
                 start,
                 length,
                 is_witness: None,
                 failing_prime: None,
-            });
+            })
+        } else {
+            None
         }
     }
 
@@ -269,6 +286,87 @@ impl Checkpoint {
         fs::rename(&tmp_path, path)?;
 
         Ok(())
+    }
+
+    /// Save checkpoint WITHOUT significant_runs (v3 slim format).
+    ///
+    /// In v3, significant_runs are logged separately via RunLogger.
+    /// The checkpoint file only contains resumable state and aggregate counts,
+    /// keeping it under 1 KB regardless of search progress.
+    pub fn save_atomic_slim<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        let path = path.as_ref();
+        let tmp_path = path.with_extension("tmp");
+
+        // Temporarily take significant_runs out, save slim, put back
+        let runs = std::mem::take(&mut self.significant_runs);
+        self.version = 3;
+        self.save(&tmp_path)?;
+        self.significant_runs = runs;
+
+        // Atomic rename
+        fs::rename(&tmp_path, path)?;
+
+        Ok(())
+    }
+}
+
+/// Append-only logger for significant runs (v3).
+///
+/// Instead of storing all run positions in the checkpoint file (which grows
+/// to 34+ MB and creates I/O bottlenecks), runs are appended to a separate
+/// JSONL file. Each run is written once when discovered, never rewritten.
+///
+/// ## File format
+///
+/// One JSON object per line (JSONL):
+/// ```jsonl
+/// {"start":15000000023895,"length":6}
+/// {"start":15000000187432,"length":7}
+/// ```
+///
+/// ## Crash recovery
+///
+/// On resume, the run log may contain a few duplicate entries (runs found
+/// between the last flush and the checkpoint save). Deduplicate by `start`
+/// position during final aggregation.
+pub struct RunLogger {
+    file: BufWriter<std::fs::File>,
+}
+
+impl RunLogger {
+    /// Create or open a run log file for appending.
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.as_ref())?;
+        Ok(Self {
+            file: BufWriter::new(file),
+        })
+    }
+
+    /// Append a single run entry to the log.
+    pub fn log_run(&mut self, run: &RunInfo) -> Result<()> {
+        serde_json::to_writer(&mut self.file, run)?;
+        self.file.write_all(b"\n")?;
+        Ok(())
+    }
+
+    /// Flush buffered writes to disk.
+    pub fn flush(&mut self) -> Result<()> {
+        self.file.flush()?;
+        Ok(())
+    }
+
+    /// Migrate existing significant_runs from a v2 checkpoint to the run log.
+    /// Returns the number of runs migrated.
+    pub fn migrate_from_v2(&mut self, runs: &[RunInfo]) -> Result<usize> {
+        let count = runs.len();
+        for run in runs {
+            self.log_run(run)?;
+        }
+        self.flush()?;
+        Ok(count)
     }
 }
 
@@ -462,5 +560,92 @@ mod tests {
 
         cp.current_pos = 1000;
         assert_eq!(cp.progress_percent(), 100.0);
+    }
+
+    #[test]
+    fn test_record_run_returns_significant() {
+        let mut cp = Checkpoint::new(13, 0, 1000);
+        // Run of 5 should not be significant (threshold is 6)
+        assert!(cp.record_run(100, 5).is_none());
+        // Run of 6 should be significant
+        let run = cp.record_run(200, 6);
+        assert!(run.is_some());
+        assert_eq!(run.unwrap().length, 6);
+        // Distribution should have both
+        assert_eq!(cp.run_distribution[&5], 1);
+        assert_eq!(cp.run_distribution[&6], 1);
+        // But significant_runs should be empty (v3 doesn't store them)
+        assert!(cp.significant_runs.is_empty());
+    }
+
+    #[test]
+    fn test_slim_save_excludes_runs() {
+        let mut cp = Checkpoint::new(13, 0, 1000);
+        // Add a fake significant run to the in-memory list
+        cp.significant_runs.push(RunInfo {
+            start: 100,
+            length: 7,
+            is_witness: None,
+            failing_prime: None,
+        });
+
+        let tmp = NamedTempFile::new().unwrap();
+        cp.save_atomic_slim(tmp.path()).unwrap();
+
+        // Load and verify significant_runs is empty in the file
+        let loaded = Checkpoint::load(tmp.path()).unwrap();
+        assert!(loaded.significant_runs.is_empty());
+        assert_eq!(loaded.version, 3);
+
+        // But the in-memory checkpoint still has them
+        assert_eq!(cp.significant_runs.len(), 1);
+    }
+
+    #[test]
+    fn test_run_logger() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut logger = RunLogger::new(tmp.path()).unwrap();
+
+        let run1 = RunInfo { start: 1000, length: 6, is_witness: None, failing_prime: None };
+        let run2 = RunInfo { start: 2000, length: 7, is_witness: None, failing_prime: None };
+
+        logger.log_run(&run1).unwrap();
+        logger.log_run(&run2).unwrap();
+        logger.flush().unwrap();
+
+        // Read back and verify
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        let lines: Vec<&str> = content.trim().split('\n').collect();
+        assert_eq!(lines.len(), 2);
+
+        let r1: RunInfo = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(r1.start, 1000);
+        assert_eq!(r1.length, 6);
+
+        let r2: RunInfo = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(r2.start, 2000);
+        assert_eq!(r2.length, 7);
+    }
+
+    #[test]
+    fn test_v2_checkpoint_loads_in_v3() {
+        // Simulate a v2 checkpoint with significant_runs
+        let mut cp = Checkpoint::new(13, 0, 1000);
+        cp.version = 2;
+        cp.significant_runs.push(RunInfo {
+            start: 500,
+            length: 8,
+            is_witness: None,
+            failing_prime: None,
+        });
+
+        let tmp = NamedTempFile::new().unwrap();
+        cp.save(tmp.path()).unwrap();
+
+        // Load as v3 — should preserve the runs for migration
+        let loaded = Checkpoint::load(tmp.path()).unwrap();
+        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.significant_runs.len(), 1);
+        assert_eq!(loaded.significant_runs[0].start, 500);
     }
 }

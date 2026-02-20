@@ -62,8 +62,11 @@ The official sequence is OEIS [A375077](https://oeis.org/A375077) ([b-file](http
 | 10 | 17,609,764,994      | Found 2025-01-20  |
 | 11 | 1,070,858,041,585   | Found 2026-02-09  |
 | 12 | 5,048,891,644,646   | Found 2026-02-11  |
+| 13 | 18,253,129,921,842  | Found 2026-02-16 *(awaiting confirmation — 15T-18.25T not yet exhaustive)* |
 
-Witnesses for k=8 through k=12 were discovered using this project and have not yet been added to the OEIS.
+The k=13 witness was found as a run of **14** consecutive Governor Set members starting at position 18,253,129,921,829. Confirmation that it is the *smallest* k=13 witness requires exhaustive search of the 15T-18.25T range (in progress on Chi, ETA ~2026-02-21).
+
+Witnesses for k=8 through k=13 were discovered using this project and have not yet been added to the OEIS.
 
 ## How It Works
 
@@ -120,9 +123,15 @@ iterations per prime — and for p=2 it reduces to a single `POPCNT` instruction
 
 ## Checkpoints
 
-Search progress is automatically saved to the `checkpoints/` directory.
-Each worker maintains its own checkpoint file (`checkpoint_k{k}_w{id}.json`),
-allowing searches to be paused and resumed without losing progress.
+Search progress is automatically saved to the output directory (default: `checkpoints/`).
+
+**v3 architecture** (2026-02-20): Each worker maintains two files:
+- `checkpoint_k{k}_w{id}.json` — Slim resume state (~750 bytes), overwritten atomically each cycle
+- `runs_k{k}_w{id}.jsonl` — Append-only run log, one JSON line per significant run (length >= 6)
+
+This decoupled design eliminates the I/O bottleneck that occurred with v2's cumulative checkpoints,
+which grew to 34+ MB per worker on long searches. The v3 binary automatically migrates existing
+v2 checkpoints on resume.
 
 ## License
 

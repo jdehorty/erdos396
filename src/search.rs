@@ -13,7 +13,7 @@
 //!   batch. Trial division would redundantly test non-dividing primes against
 //!   every number. For 10M numbers at n=10^10, this saves ~100M+ operations.
 
-use crate::checkpoint::Checkpoint;
+use crate::checkpoint::{Checkpoint, RunLogger};
 use crate::governor::GovernorChecker;
 use crate::prefilter::FusedBatchResult;
 use crate::sieve::PrimeSieve;
@@ -249,6 +249,7 @@ impl SearchWorker {
         progress: &GlobalProgress,
         checkpoint_path: &PathBuf,
         checkpoint_interval: u64,
+        run_logger: &mut RunLogger,
     ) -> Result<()> {
         let search_start = checkpoint.current_pos;
 
@@ -269,6 +270,7 @@ impl SearchWorker {
                 progress,
                 checkpoint_path,
                 checkpoint_interval,
+                run_logger,
             )
         } else {
             self.search_linear(
@@ -278,6 +280,7 @@ impl SearchWorker {
                 progress,
                 checkpoint_path,
                 checkpoint_interval,
+                run_logger,
             )
         }
     }
@@ -295,6 +298,7 @@ impl SearchWorker {
         progress: &GlobalProgress,
         checkpoint_path: &PathBuf,
         checkpoint_interval: u64,
+        run_logger: &mut RunLogger,
     ) -> Result<()> {
         let mut current_run = 0usize;
         let mut run_start = search_start;
@@ -362,7 +366,9 @@ impl SearchWorker {
                     }
                 } else {
                     if current_run >= 2 {
-                        checkpoint.record_run(run_start, current_run);
+                        if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
+                            run_logger.log_run(&run_info)?;
+                        }
                     }
                     current_run = 0;
                 }
@@ -436,7 +442,8 @@ impl SearchWorker {
                 checkpoint_counter += 1;
                 if checkpoint_counter >= checkpoint_interval {
                     checkpoint.touch();
-                    checkpoint.save_atomic(checkpoint_path)?;
+                    checkpoint.save_atomic_slim(checkpoint_path)?;
+                    run_logger.flush()?;
                     checkpoint_counter = 0;
                 }
             }
@@ -445,11 +452,14 @@ impl SearchWorker {
         }
 
         if current_run >= 2 {
-            checkpoint.record_run(run_start, current_run);
+            if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
+                run_logger.log_run(&run_info)?;
+            }
         }
 
         checkpoint.touch();
-        checkpoint.save_atomic(checkpoint_path)?;
+        checkpoint.save_atomic_slim(checkpoint_path)?;
+        run_logger.flush()?;
 
         log::info!(
             "Worker {} completed: checked {}, governors {}, longest run {} at {}",
@@ -472,6 +482,7 @@ impl SearchWorker {
         progress: &GlobalProgress,
         checkpoint_path: &PathBuf,
         checkpoint_interval: u64,
+        run_logger: &mut RunLogger,
     ) -> Result<()> {
         let mut current_run = 0usize;
         let mut run_start = search_start;
@@ -509,7 +520,9 @@ impl SearchWorker {
                 }
             } else {
                 if current_run >= 2 {
-                    checkpoint.record_run(run_start, current_run);
+                    if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
+                        run_logger.log_run(&run_info)?;
+                    }
                 }
                 current_run = 0;
             }
@@ -517,17 +530,21 @@ impl SearchWorker {
             checkpoint_counter += 1;
             if checkpoint_counter >= checkpoint_interval {
                 checkpoint.touch();
-                checkpoint.save_atomic(checkpoint_path)?;
+                checkpoint.save_atomic_slim(checkpoint_path)?;
+                run_logger.flush()?;
                 checkpoint_counter = 0;
             }
         }
 
         if current_run >= 2 {
-            checkpoint.record_run(run_start, current_run);
+            if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
+                run_logger.log_run(&run_info)?;
+            }
         }
 
         checkpoint.touch();
-        checkpoint.save_atomic(checkpoint_path)?;
+        checkpoint.save_atomic_slim(checkpoint_path)?;
+        run_logger.flush()?;
 
         log::info!(
             "Worker {} completed: checked {}, governors {}, longest run {} at {}",
@@ -656,6 +673,10 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                 .output_dir
                 .join(format!("checkpoint_k{}_w{:02}.json", config.target_k, worker_id));
 
+            let run_log_path = config
+                .output_dir
+                .join(format!("runs_k{}_w{:02}.jsonl", config.target_k, worker_id));
+
             let mut checkpoint = if checkpoint_path.exists() {
                 match Checkpoint::load(&checkpoint_path) {
                     Ok(cp) => {
@@ -670,6 +691,35 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
             } else {
                 Checkpoint::new_worker(config.target_k, w_start, w_end, worker_id)
             };
+
+            // Create run logger (append-only JSONL)
+            let mut run_logger = match RunLogger::new(&run_log_path) {
+                Ok(rl) => rl,
+                Err(e) => {
+                    log::error!("Worker {} failed to create run logger: {}", worker_id, e);
+                    return checkpoint;
+                }
+            };
+
+            // v2 → v3 migration: if checkpoint has existing significant_runs,
+            // migrate them to the run log file
+            if !checkpoint.significant_runs.is_empty() {
+                let count = checkpoint.significant_runs.len();
+                log::info!(
+                    "Worker {} migrating {} significant runs from v2 checkpoint to run log",
+                    worker_id, count
+                );
+                match run_logger.migrate_from_v2(&checkpoint.significant_runs) {
+                    Ok(n) => {
+                        log::info!("Worker {} migrated {} runs to {}", worker_id, n, run_log_path.display());
+                        checkpoint.significant_runs.clear();
+                    }
+                    Err(e) => {
+                        log::error!("Worker {} failed to migrate runs: {}", worker_id, e);
+                        return checkpoint;
+                    }
+                }
+            }
 
             let worker = SearchWorker::new(
                 worker_id,
@@ -689,6 +739,7 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                 &progress,
                 &checkpoint_path,
                 config.checkpoint_interval,
+                &mut run_logger,
             ) {
                 log::error!("Worker {} error: {}", worker_id, e);
             }
@@ -966,6 +1017,12 @@ mod tests {
             "Should find k=1 witness at n=2"
         );
         assert!(result.total_governors > 0, "Should find governor members");
+
+        // v3: verify run log files were created
+        let run_log_0 = dir.path().join("runs_k1_w00.jsonl");
+        let run_log_1 = dir.path().join("runs_k1_w01.jsonl");
+        assert!(run_log_0.exists(), "Run log for worker 0 should exist");
+        assert!(run_log_1.exists(), "Run log for worker 1 should exist");
     }
 
     #[test]
@@ -1104,5 +1161,47 @@ mod tests {
                 ce.n
             );
         }
+    }
+
+    #[test]
+    fn test_v3_checkpoint_is_slim() {
+        let dir = tempdir().unwrap();
+
+        let config = SearchConfig {
+            target_k: 2,
+            start: 1,
+            end: 10000,
+            num_workers: 1,
+            checkpoint_interval: 5000,
+            output_dir: dir.path().to_path_buf(),
+            verify_candidates: true,
+            report_interval: Duration::from_secs(1),
+            no_prefilter: false,
+            full_verify: false,
+            safety_net: false,
+        };
+
+        let _result = parallel_search(&config).unwrap();
+
+        // Verify checkpoint file is slim (no significant_runs)
+        let cp_path = dir.path().join("checkpoint_k2_w00.json");
+        let cp = Checkpoint::load(&cp_path).unwrap();
+        assert!(
+            cp.significant_runs.is_empty(),
+            "v3 checkpoint should have empty significant_runs"
+        );
+        assert_eq!(cp.version, 3, "Checkpoint should be version 3");
+
+        // Verify checkpoint file is small (under 2KB)
+        let file_size = std::fs::metadata(&cp_path).unwrap().len();
+        assert!(
+            file_size < 2048,
+            "v3 checkpoint should be under 2KB, got {} bytes",
+            file_size
+        );
+
+        // Verify run log exists and has content
+        let run_log_path = dir.path().join("runs_k2_w00.jsonl");
+        assert!(run_log_path.exists(), "Run log should exist");
     }
 }

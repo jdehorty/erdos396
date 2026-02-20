@@ -24,7 +24,7 @@ pub mod sieve;
 pub mod verify;
 
 // Re-export main types for convenience
-pub use checkpoint::{Checkpoint, CheckpointManager, CounterExampleInfo};
+pub use checkpoint::{Checkpoint, CheckpointManager, CounterExampleInfo, RunLogger};
 pub use factor::Factorization;
 pub use governor::GovernorChecker;
 pub use search::{SearchConfig, SearchResult, SearchWorker};
@@ -44,6 +44,9 @@ pub const KNOWN_WITNESSES: &[(u32, u64)] = &[
     (8, 339_949_252),
     (9, 17_609_764_993),  // Found 2025-01-20! (run of 11 governors)
     (10, 17_609_764_994), // Found 2025-01-20! (same run of 11!)
+    (11, 1_070_858_041_585),   // Found 2026-02-09 (run of 12)
+    (12, 5_048_891_644_646),   // Found 2026-02-11 (run of 13)
+    (13, 18_253_129_921_842),  // Found 2026-02-16 (run of 14) — awaiting min confirmation
 ];
 
 /// Known runs of 9 consecutive Governor Set members found during k=9 search
