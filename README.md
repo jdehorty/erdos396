@@ -1,92 +1,64 @@
 # Erdős Problem #396 — Witness Search
 
-High-performance parallel search for witnesses to [Erdős Problem #396](https://www.erdosproblems.com/396) (OEIS [A375077](https://oeis.org/A375077)):
+Paper companion repository for *[paper title TBD]*.
 
 > For each *k*, find the smallest *n* such that *n*(*n*−1)(*n*−2)⋯(*n*−*k*) divides C(2*n*, *n*).
 
-## Key Insight: Governor Set Approach
+This project discovered the smallest witnesses for k = 8 through k = 13 via exhaustive search of up to 25 trillion integers, extending OEIS [A375077](https://oeis.org/A375077).
 
-All known witnesses have every block term in the **Governor Set** G = {n : n | C(2n, n)}.
-This reduces the search to finding runs of consecutive Governor Set members, then verifying
-each candidate with a full p-adic valuation test.
+## Results
 
-## Building
+| k  | Smallest witness *n*  | Search range | Status            |
+|----|----------------------|--------------|-------------------|
+| 1  | 2                    | —            | Known (OEIS)      |
+| 2  | 2,480                | —            | Known (OEIS)      |
+| 3  | 8,178                | —            | Known (OEIS)      |
+| 4  | 45,153               | —            | Known (OEIS)      |
+| 5  | 3,648,841            | —            | Known (OEIS)      |
+| 6  | 7,979,090            | —            | Known (OEIS)      |
+| 7  | 101,130,029          | —            | Known (OEIS)      |
+| 8  | 339,949,252          | 0–370M       | Found 2025-01-17  |
+| 9  | 17,609,764,993       | 0–19.3B      | Found 2025-01-20  |
+| 10 | 17,609,764,994       | 0–19.3B      | Found 2025-01-20  |
+| 11 | 1,070,858,041,585    | 0–2T         | Found 2026-02-09  |
+| 12 | 5,048,891,644,646    | 0–6.15T      | Found 2026-02-11  |
+| 13 | 18,253,129,921,842   | 0–25T        | Found 2026-02-16  |
 
-```bash
-cargo build --release
-```
+## How to verify our claims
 
-## Usage
-
-### Search
-
-```bash
-# Search for k=9 witnesses in a range
-cargo run --release -- --start 1000000 --end 2000000 -k 9
-
-# Use a specific number of workers
-cargo run --release -- --start 1000000 --end 2000000 -k 9 --workers 8
-
-# List known witnesses
-cargo run --release -- --list-known
-
-# Verify all known witnesses
-cargo run --release -- --verify-known
-```
-
-### Verification
+Three independent verification paths:
 
 ```bash
-# Verify a specific candidate
-cargo run --release --bin verify -- -k 8 -n 339949252
-
-# Verify all known witnesses
+# 1. Verify all 13 known witnesses (seconds)
 cargo run --release --bin verify -- --known
+
+# 2. Check the formal proof of the Small Prime Barrier Theorem (minutes)
+cd formal && lake build
+
+# 3. Validate minimality for k=13 via provably complete small-prime sieve (days)
+cargo run --release --bin validate -- -k 13 --start 0 --end 18253129921842 --workers 40
 ```
 
-### Validation (Small-Prime Sieve, Provably Complete)
+Command (1) confirms each claimed witness satisfies the divisibility condition.
+Command (2) machine-checks that checking barrier primes p < 2k+1 suffices to find
+every witness (Theorem 1). Command (3) applies that theorem to prove no k=13 witness
+exists below our claimed minimum.
 
-`validate` is a **second-pass** tool meant to run over a range that has already
-been covered by the Governor Set search.
+## Method
 
-It checks *every* integer `n` in the range against the witness condition at the
-**barrier primes** `p < 2k+1`. By the Small Prime Barrier Theorem, this screen
-has **zero false negatives**: any k-witness (governor run or not) must pass it.
-Candidates that pass are then fully verified.
+All known witnesses have every block term in the **Governor Set** G = {n : n | C(2n, n)}
+(OEIS [A014847](https://oeis.org/A014847), density ~12.3%). The search reduces to
+finding runs of k+1 consecutive Governor Set members, then verifying each candidate
+with a full p-adic valuation test. A fused sieve+governor computation rejects ~87%
+of integers in a single pass using Kummer's theorem for v_p(C(2n, n)).
 
-```bash
-# Validate minimality for k=11 up to the known minimum witness
-cargo run --release --bin validate -- -k 11 --start 0 --end 1070858041585 --workers 40
-```
+The **Small Prime Barrier Theorem** (proved in `formal/`) shows that any witness
+invisible to the Governor Set sieve must have governor failures only at primes
+p < 2k+1. For k=13, this is just 9 primes. The `validate` binary exploits this
+to provide a provably complete second pass that checks every integer — not just
+governors — confirming no witnesses were missed.
 
-## Known Witnesses
-
-The official sequence is OEIS [A375077](https://oeis.org/A375077) ([b-file](https://oeis.org/A375077/b375077.txt)), which currently lists k=1 through k=7:
-
-| k  | Smallest witness n   | Status            |
-|----|---------------------|-------------------|
-| 1  | 2                   | Known (OEIS)      |
-| 2  | 2,480               | Known (OEIS)      |
-| 3  | 8,178               | Known (OEIS)      |
-| 4  | 45,153              | Known (OEIS)      |
-| 5  | 3,648,841           | Known (OEIS)      |
-| 6  | 7,979,090           | Known (OEIS)      |
-| 7  | 101,130,029         | Known (OEIS)      |
-| 8  | 339,949,252         | Found 2025-01-17  |
-| 9  | 17,609,764,993      | Found 2025-01-20  |
-| 10 | 17,609,764,994      | Found 2025-01-20  |
-| 11 | 1,070,858,041,585   | Found 2026-02-09  |
-| 12 | 5,048,891,644,646   | Found 2026-02-11  |
-| 13 | 18,253,129,921,842  | Found 2026-02-16  |
-
-The k=13 witness is a run of **14** consecutive Governor Set members starting at position 18,253,129,921,829. Confirmed as the smallest k=13 witness by exhaustive search of 15T-25T (10 trillion integers) on a 40-core server.
-
-Witnesses for k=8 through k=13 were discovered using this project and have not yet been added to the OEIS.
-
-## How It Works
-
-The search pipeline uses a fused sieve+governor computation to reject ~87% of candidates
-in a single pass, then detects consecutive governor runs and verifies them:
+## Search Pipeline
 
 ```mermaid
 graph TD
@@ -120,7 +92,7 @@ graph TD
     style L fill:#1a1a2e,stroke:#e94560,color:#999
 ```
 
-Only ~12.6% of candidates survive the fused sieve (matching the Ford–Konyagin governor density).
+Only ~12.6% of candidates survive the fused sieve (matching the Ford-Konyagin governor density).
 Kummer's theorem replaces Legendre's formula for computing v_p(C(2n,n)), halving the number of
 iterations per prime — and for p=2 it reduces to a single `POPCNT` instruction.
 
@@ -128,25 +100,34 @@ iterations per prime — and for p=2 it reduces to a single `POPCNT` instruction
 
 | File | Purpose |
 |------|---------|
-| `sieve.rs` | Prime sieve (Sieve of Eratosthenes) |
-| `factor.rs` | Integer factorization via trial division |
-| `governor.rs` | Governor Set membership checking via Kummer's theorem |
-| `prefilter.rs` | Fused sieve+governor batch computation (performance-critical hot loop) |
-| `verify.rs` | Full witness verification with p-adic analysis |
-| `search.rs` | Parallel search with rayon, run detection, checkpointing |
-| `checkpoint.rs` | Checkpoint save/resume for long-running searches |
+| `src/sieve.rs` | Prime sieve (Sieve of Eratosthenes) |
+| `src/factor.rs` | Integer factorization via trial division |
+| `src/governor.rs` | Governor Set membership via Kummer's theorem |
+| `src/prefilter.rs` | Fused sieve+governor batch computation (hot loop) |
+| `src/verify.rs` | Full witness verification with p-adic analysis |
+| `src/search.rs` | Parallel search with rayon, run detection, checkpointing |
+| `src/checkpoint.rs` | Checkpoint save/resume for long-running searches |
+| `src/bin/verify.rs` | CLI for verifying individual or known witnesses |
+| `src/bin/validate.rs` | Provably complete small-prime sieve (Corollary 6) |
+| `formal/` | Lean 4 proof of the Small Prime Barrier Theorem |
+| `docs/` | Mathematical exposition and validation architecture |
 
-## Checkpoints
+## Formal Verification
 
-Search progress is automatically saved to the output directory (default: `checkpoints/`).
+The `formal/` directory contains a standalone Lean 4 + Mathlib project that
+machine-checks the Small Prime Barrier Theorem. See [`formal/README.md`](formal/README.md)
+for build instructions and a summary of what is proven.
 
-**v3 architecture** (2026-02-20): Each worker maintains two files:
-- `checkpoint_k{k}_w{id}.json` — Slim resume state (~750 bytes), overwritten atomically each cycle
-- `runs_k{k}_w{id}.jsonl` — Append-only run log, one JSON line per significant run (length >= 6)
+## Citation
 
-This decoupled design eliminates the I/O bottleneck that occurred with v2's cumulative checkpoints,
-which grew to 34+ MB per worker on long searches. The v3 binary automatically migrates existing
-v2 checkpoints on resume.
+```bibtex
+@misc{dehorty2026erdos396,
+  author = {Dehorty, Justin},
+  title  = {Witness Search for {Erd\H{o}s} Problem \#396},
+  year   = {2026},
+  url    = {https://github.com/TODO}
+}
+```
 
 ## License
 
