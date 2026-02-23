@@ -62,7 +62,7 @@ The official sequence is OEIS [A375077](https://oeis.org/A375077) ([b-file](http
 | 10 | 17,609,764,994      | Found 2025-01-20  |
 | 11 | 1,070,858,041,585   | Found 2026-02-09  |
 | 12 | 5,048,891,644,646   | Found 2026-02-11  |
-| 13 | 18,253,129,921,842  | Found 2026-02-16, confirmed 2026-02-21 |
+| 13 | 18,253,129,921,842  | Found 2026-02-16  |
 
 The k=13 witness is a run of **14** consecutive Governor Set members starting at position 18,253,129,921,829. Confirmed as the smallest k=13 witness by exhaustive search of 15T-25T (10 trillion integers) on a 40-core server.
 
