@@ -44,6 +44,21 @@ cargo run --release --bin verify -- -k 8 -n 339949252
 cargo run --release --bin verify -- --known
 ```
 
+### Validation (Small-Prime Sieve, Provably Complete)
+
+`validate` is a **second-pass** tool meant to run over a range that has already
+been covered by the Governor Set search.
+
+It checks *every* integer `n` in the range against the witness condition at the
+**barrier primes** `p < 2k+1`. By the Small Prime Barrier Theorem, this screen
+has **zero false negatives**: any k-witness (governor run or not) must pass it.
+Candidates that pass are then fully verified.
+
+```bash
+# Validate minimality for k=11 up to the known minimum witness
+cargo run --release --bin validate -- -k 11 --start 0 --end 1070858041585 --workers 40
+```
+
 ## Known Witnesses
 
 The official sequence is OEIS [A375077](https://oeis.org/A375077) ([b-file](https://oeis.org/A375077/b375077.txt)), which currently lists k=1 through k=7:
