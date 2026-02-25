@@ -19,9 +19,13 @@ bound 2k+1 is tight.
 
 For k = 13, this constrains any potential non-governor witness to involve
 governor failures only at the 9 primes {2, 3, 5, 7, 11, 13, 17, 19, 23},
-and implies that a sliding-window check of the witness condition at these
-primes is a **provably complete** method for finding all Erdős 396 witnesses
-in any range — including any that the standard Governor Set sieve might miss.
+and identifies these primes as the only place “non-governor” behavior can occur.
+In particular, every k-witness passes the witness inequality at these primes
+(as it does at all primes), so a sliding-window screen at the barrier primes
+followed by full all-prime verification yields a **provably complete**
+computational method for finding all Erdős 396 witnesses in any range — including
+any that the standard Governor Set sieve might miss (subject to the usual
+software/hardware trust assumptions; see `docs/trust.md`).
 
 ---
 

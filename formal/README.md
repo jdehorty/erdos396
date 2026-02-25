@@ -6,19 +6,19 @@ Machine-checked proof of the Small Prime Barrier Theorem for Erdős Problem #396
 
 This project formalizes three results from the paper:
 
-1. **Carry Invariance** (`carry_invariance_supply`): For primes q ≥ 3 with q ∣ m,
+1. **Carry Invariance** (`Erdos396.carry_invariance_supply`): For primes q ≥ 3 with q ∣ m,
    shifting m by j ≤ (q−1)/2 preserves the p-adic supply v_q(C(2m, m)).
 
-2. **Small Prime Barrier** (`small_prime_barrier`): If n is a k-witness and a block
+2. **Small Prime Barrier** (`Erdos396.small_prime_barrier`): If n is a k-witness and a block
    term n−j fails the governor test at a prime q ≥ 2k+1, then n cannot be a
    k-witness — contradiction. Equivalently, non-governor failures in a witness
    block are confined to primes below 2k+1.
 
-3. **Tightness** (`small_prime_barrier_tight`): The bound 2k+1 is optimal. For every
+3. **Tightness** (`Erdos396.small_prime_barrier_tight`): The bound 2k+1 is optimal. For every
    k ≥ 1, there exist parameters where the carry invariance breaks at a prime
    q ≤ 2k (using Bertrand's postulate).
 
-The corollary `governor_test_passes_at_large_primes` gives the contrapositive form
+The corollary `Erdos396.governor_test_passes_at_large_primes` gives the contrapositive form
 used by the `validate` binary: every block term of a k-witness passes the governor
 test at all primes q ≥ 2k+1.
 
@@ -41,16 +41,18 @@ Subsequent builds are cached and complete in seconds.
 
 Key Mathlib imports:
 - `Mathlib.Data.Nat.Choose.Central` — central binomial coefficients
-- `Mathlib.NumberTheory.Padics.PadicVal` — p-adic valuations
+- `Mathlib.NumberTheory.Padics.PadicVal.Basic` — p-adic valuations
 - `Mathlib.NumberTheory.Bertrand` — Bertrand's postulate
 
 ## Structure
 
 ```
 formal/
+├── SmallPrimeBarrier.lean — convenience import
 ├── SmallPrimeBarrier/
-│   ├── Defs.lean    — supply, IsWitness definitions
-│   └── Main.lean    — all theorems and proofs
+│   ├── Defs.lean       — supply, IsWitness definitions
+│   ├── Main.lean       — all theorems and proofs
+│   └── Algorithm.lean  — identities used by `validate` (including sliding-window demand updates)
 ├── lakefile.toml
 ├── lean-toolchain
 └── README.md

@@ -1,6 +1,6 @@
 # Erdős Problem #396 — Witness Search
 
-Paper companion repository for *[paper title TBD]*.
+Paper companion repository for *Witness Search for Erdős Problem #396*.
 
 > For each *k*, find the smallest *n* such that *n*(*n*−1)(*n*−2)⋯(*n*−*k*) divides C(2*n*, *n*).
 
@@ -26,23 +26,39 @@ This project discovered the smallest witnesses for k = 8 through k = 13 via exha
 
 ## How to verify our claims
 
-Three independent verification paths:
+Independent verification paths:
 
 ```bash
 # 1. Verify all 13 known witnesses (seconds)
 cargo run --release --bin verify -- --known
+
+# 1b. Independently verify witness validity (seconds, stdlib-only)
+python3 scripts/verify_witness.py --known
 
 # 2. Check the formal proof of the Small Prime Barrier Theorem (minutes)
 cd formal && lake build
 
 # 3. Validate minimality for k=13 via provably complete small-prime sieve (days)
 cargo run --release --bin validate -- -k 13 --start 0 --end 18253129921842 --workers 40
+
+# 3b. Independently check the validate report invariants (seconds, stdlib-only)
+python3 scripts/check_validate_report.py validate_checkpoints/validate_report_k13_0_18253129921842.json
 ```
 
 Command (1) confirms each claimed witness satisfies the divisibility condition.
-Command (2) machine-checks that checking barrier primes p < 2k+1 suffices to find
-every witness (Theorem 1). Command (3) applies that theorem to prove no k=13 witness
-exists below our claimed minimum.
+Command (2) machine-checks the Small Prime Barrier Theorem, which is what justifies
+restricting the `validate` *screen* to the barrier primes p < 2k+1 (Corollary 6).
+Command (3) enumerates every n in the range, screens at those primes, and fully
+verifies any screen-pass candidates; this yields a computational certificate of
+minimality under the standard trust assumptions for software and hardware. See
+`docs/trust.md`. For a reviewer-oriented checklist, see `docs/reproducibility.md`.
+
+For additional runtime confidence on a given machine, both `erdos396` and `validate`
+support optional startup/periodic cross-checks (see `docs/reproducibility.md`).
+
+On successful completion, `erdos396` also writes a `search_report_*.json` into its output
+directory with coverage invariants (count/sum/XOR) and build metadata; reviewers can
+independently check it with `python3 scripts/check_search_report.py ...`.
 
 ## Method
 
@@ -55,8 +71,10 @@ of integers in a single pass using Kummer's theorem for v_p(C(2n, n)).
 The **Small Prime Barrier Theorem** (proved in `formal/`) shows that any witness
 invisible to the Governor Set sieve must have governor failures only at primes
 p < 2k+1. For k=13, this is just 9 primes. The `validate` binary exploits this
-to provide a provably complete second pass that checks every integer — not just
-governors — confirming no witnesses were missed.
+to provide a provably complete *algorithmic* second pass that checks every
+integer — not just governors. The resulting computation supports the minimality
+claims under the standard trust assumptions for software and hardware (see
+`docs/trust.md`).
 
 ## Search Pipeline
 
@@ -109,6 +127,7 @@ iterations per prime — and for p=2 it reduces to a single `POPCNT` instruction
 | `src/checkpoint.rs` | Checkpoint save/resume for long-running searches |
 | `src/bin/verify.rs` | CLI for verifying individual or known witnesses |
 | `src/bin/validate.rs` | Provably complete small-prime sieve (Corollary 6) |
+| `src/bin/audit_runs.rs` | Audit run logs (`runs_k*_w*.jsonl`) by full verification |
 | `formal/` | Lean 4 proof of the Small Prime Barrier Theorem |
 | `docs/` | Mathematical exposition and validation architecture |
 
@@ -116,7 +135,8 @@ iterations per prime — and for p=2 it reduces to a single `POPCNT` instruction
 
 The `formal/` directory contains a standalone Lean 4 + Mathlib project that
 machine-checks the Small Prime Barrier Theorem. See [`formal/README.md`](formal/README.md)
-for build instructions and a summary of what is proven.
+for build instructions and a summary of what is proven. For an informal Lean↔Rust mapping,
+see `docs/lean_rust_bridge.md`.
 
 ## Citation
 
@@ -125,7 +145,7 @@ for build instructions and a summary of what is proven.
   author = {Dehorty, Justin},
   title  = {Witness Search for {Erd\H{o}s} Problem \#396},
   year   = {2026},
-  url    = {https://github.com/TODO}
+  url    = {https://github.com/jdehorty/erdos396}
 }
 ```
 

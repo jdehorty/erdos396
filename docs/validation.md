@@ -46,16 +46,32 @@ positive catalog with failing primes, demand, and supply.
 
 **Output:** Whether each run is a true k-witness or a false positive (and why).
 
+This repo includes an implementation of this audit as the `audit_runs` binary:
+
+```bash
+# Audit runs_k13_w*.jsonl in checkpoints/ and write a summary report.
+cargo run --release --bin audit_runs -- -k 13 -d checkpoints -o audit_runs_k13_report.json
+```
+
+Optional outputs (can be large):
+
+```bash
+# Write JSONL catalogs for witnesses and false positives.
+cargo run --release --bin audit_runs -- -k 13 -d checkpoints \
+  --witness-jsonl audit_runs_k13_witnesses.jsonl \
+  --false-positive-jsonl audit_runs_k13_false_positives.jsonl
+```
+
 ### Phase 2: Non-Governor Witness Search (Completeness Check)
 
 The `validate` binary implements this phase. For each integer n in a range, it
 checks the witness condition at the **barrier primes** p < 2k+1 using a sliding
 window over the block {n-k, ..., n}.
 
-By the Small Prime Barrier Theorem (Corollary 6), this is a **provably complete**
-method: any k-witness — governor run or not — satisfies the witness condition at
-all primes, including all barrier primes. Therefore every witness passes the
-small-prime screen and is detected.
+Mathematically, this screen has **zero false negatives**: any k-witness satisfies
+the witness condition at *every* prime, hence in particular at all barrier primes.
+The Small Prime Barrier Theorem (Corollary 6) explains why restricting the *screen*
+to primes `p < 2k+1` is the right place to look for any “non-governor” behavior.
 
 The sliding window maintains per-prime demand sums incrementally. As n advances
 by 1, one term leaves and one enters the window. For k=13 with 9 barrier primes,
@@ -70,13 +86,32 @@ Candidates passing the screen undergo full all-prime verification.
 cargo run --release --bin validate -- -k 13 --start 0 --end 18253129921842
 ```
 
+`validate` writes per-worker checkpoints and a `validate_report_*.json` summary
+containing coverage invariants (count/sum/XOR) and the witness list.
+For an *independent* check of those invariants (separate implementation, stdlib-only),
+run:
+
+```bash
+python3 scripts/check_validate_report.py validate_checkpoints/validate_report_k13_0_18253129921842.json
+```
+
+If you run `validate` in multiple contiguous chunks, you can also verify that the
+reports form a gap-free partition of the scanned range:
+
+```bash
+python3 scripts/check_validate_report.py --check-partition validate_checkpoints/validate_report_k13_*.json
+```
+
+For additional runtime confidence on a given machine, enable
+`--self-check-samples` and/or `--audit-interval`.
+
 | | `erdos396` (Governor Search) | `validate` (Small-Prime Sieve) |
 |---|---|---|
 | **Tests** | Is each n a Governor Set member? | Does n satisfy the witness condition? |
 | **Skips** | Non-governors (immediately) | Nothing — checks every integer |
 | **Filter** | Governor run detection | Barrier primes p < 2k+1 only |
 | **Purpose** | Find witnesses efficiently | Prove none were missed |
-| **Completeness** | Assumes Completeness Conjecture | Provably complete (Theorem 1) |
+| **Completeness** | Assumes Completeness Conjecture | Complete screen + full verification |
 
 ### Phase 3: Cross-Validation
 
@@ -95,8 +130,9 @@ Running all three phases produces a **Certificate of Minimality** for each k:
 2. **Small-Prime Sieve** proved no witness exists in [0, N).
 3. **Cross-Validation** confirmed both methods agree.
 
-Together, these constitute a proof that N is the smallest k-witness —
-independent of the Governor Set Completeness Conjecture.
+Together, these constitute a *computational* certificate that N is the smallest
+k-witness — independent of the Governor Set Completeness Conjecture (see
+`docs/trust.md` for remaining software/hardware assumptions).
 
 ---
 
@@ -107,8 +143,17 @@ The completeness of Phase 2 rests on the Small Prime Barrier Theorem:
 > **Theorem 1.** If n is a k-witness and a block term n−j fails the governor
 > test at prime q, then q < 2k+1.
 
-> **Corollary 6.** Checking the witness condition at primes p < 2k+1 for every
-> integer in a range is a provably complete method for finding all k-witnesses.
+> **Corollary 6.** Screening every integer in a range using only primes p < 2k+1
+> yields a candidate set with zero false negatives; fully verifying each candidate
+> yields all k-witnesses in the range.
 
 The formal Lean 4 proof is in `formal/SmallPrimeBarrier/`. See
 `docs/small_prime_barrier.md` for the full mathematical exposition.
+
+---
+
+## 5. Trust model
+
+The theorem is machine-checked, but the Rust implementation is conventional
+software (not formally verified). For a clear statement of what is proven vs.
+computed and what assumptions remain, see `docs/trust.md`.
