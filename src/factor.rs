@@ -3,6 +3,7 @@
 //! For numbers up to 10^10, trial division with a precomputed prime sieve
 //! is highly efficient. Each factorization is O(sqrt(n) / ln(sqrt(n))).
 
+use crate::int_math::isqrt_u64;
 use crate::sieve::PrimeSieve;
 
 /// A prime factorization represented as (prime, exponent) pairs.
@@ -45,7 +46,7 @@ impl Factorization {
         }
 
         let mut factors: SmallVec<[(u64, u32); 8]> = SmallVec::new();
-        let mut sqrt_n = (n as f64).sqrt() as u64;
+        let mut sqrt_n = isqrt_u64(n);
 
         for &p in sieve.primes() {
             if p > sqrt_n {
@@ -63,7 +64,7 @@ impl Factorization {
                 if n == 1 {
                     break;
                 }
-                sqrt_n = (n as f64).sqrt() as u64;
+                sqrt_n = isqrt_u64(n);
             }
         }
 

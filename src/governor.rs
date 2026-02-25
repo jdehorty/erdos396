@@ -14,6 +14,7 @@
 //!   after trial division is an odd prime > √(2n), immediately return false.
 
 use crate::factor::Factorization;
+use crate::int_math::{isqrt_2n_u64, isqrt_u64};
 use crate::sieve::PrimeSieve;
 
 /// Checker for Governor Set membership with cached prime sieve.
@@ -78,7 +79,7 @@ impl GovernorChecker {
         }
 
         let mut remaining = n;
-        let mut sqrt_remaining = (remaining as f64).sqrt() as u64;
+        let mut sqrt_remaining = isqrt_u64(remaining);
 
         for &p in self.sieve.primes() {
             if p > sqrt_remaining {
@@ -110,7 +111,7 @@ impl GovernorChecker {
                 if remaining == 1 {
                     return true; // All factors checked and passed
                 }
-                sqrt_remaining = (remaining as f64).sqrt() as u64;
+                sqrt_remaining = isqrt_u64(remaining);
             }
         }
 
@@ -118,7 +119,7 @@ impl GovernorChecker {
         if remaining > 1 {
             // √(2n) barrier: if this prime > √(2n), then v_p(C(2n,n)) = 0
             // but v_p(n) = 1, so n ∉ G. Skip the Legendre computation entirely.
-            let sqrt_2n = ((2.0 * n as f64).sqrt()) as u64;
+            let sqrt_2n = isqrt_2n_u64(n);
             if remaining > sqrt_2n {
                 return false;
             }

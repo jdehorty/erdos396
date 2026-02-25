@@ -14,7 +14,10 @@
 //!    of each prime (amortized), while trial division tests every prime
 //!    against every number.
 
-use crate::governor::{vp_central_binom_kummer_fast, vp_central_binom_p2, vp_central_binom_p3, vp_central_binom_p5};
+use crate::governor::{
+    vp_central_binom_kummer_fast, vp_central_binom_p2, vp_central_binom_p3, vp_central_binom_p5,
+};
+use crate::int_math::isqrt_u128;
 
 /// Fused batch result: exact governor membership computed in a single sieve pass.
 ///
@@ -62,8 +65,8 @@ impl FusedBatchResult {
             };
         }
 
-        let hi = lo + len as u64;
-        let sieve_limit = ((2.0 * hi as f64).sqrt()) as u64 + 1;
+        let max_n: u128 = (lo as u128) + (len as u128) - 1;
+        let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(1);
 
         // remaining[i] tracks the cofactor of (lo+i) after dividing out small primes.
         // For non-rejected numbers, this is maintained accurately.
@@ -206,8 +209,8 @@ impl BatchFilter {
             };
         }
 
-        let hi = lo + len as u64;
-        let sieve_limit = ((2.0 * hi as f64).sqrt()) as u64 + 1;
+        let max_n: u128 = (lo as u128) + (len as u128) - 1;
+        let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(1);
 
         let mut remaining = Vec::with_capacity(len);
         for i in 0..len {
@@ -284,7 +287,10 @@ mod tests {
         let sieve = PrimeSieve::new(200);
         let filter = BatchFilter::compute(lo, len, sieve.primes());
 
-        for &p in &[101u64, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199] {
+        for &p in &[
+            101u64, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181,
+            191, 193, 197, 199,
+        ] {
             if p >= lo && p < lo + len as u64 {
                 let idx = (p - lo) as usize;
                 assert!(
@@ -318,20 +324,27 @@ mod tests {
         let filter = BatchFilter::compute(lo, len, sieve.primes());
 
         let idx = (10007 - lo) as usize;
-        assert!(!filter.can_be_governor[idx], "Prime 10007 should be rejected");
+        assert!(
+            !filter.can_be_governor[idx],
+            "Prime 10007 should be rejected"
+        );
     }
 
     #[test]
     fn test_rejection_rate_large_range() {
         let lo = 1_000_000u64;
         let len = 100_000usize;
-        let hi = lo + len as u64;
-        let sieve_limit = ((2.0 * hi as f64).sqrt()) as u64 + 1000;
+        let max_n: u128 = (lo as u128) + (len as u128) - 1;
+        let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(1000);
         let sieve = PrimeSieve::new(sieve_limit);
         let filter = BatchFilter::compute(lo, len, sieve.primes());
 
         let rate = (filter.rejected as f64 / (filter.passed + filter.rejected) as f64) * 100.0;
-        assert!(rate > 40.0, "Expected rejection rate > 40%, got {:.1}%", rate);
+        assert!(
+            rate > 40.0,
+            "Expected rejection rate > 40%, got {:.1}%",
+            rate
+        );
     }
 
     #[test]
@@ -341,7 +354,8 @@ mod tests {
         let lo = 10000u64;
         let len = 1000usize;
         let hi = lo + len as u64;
-        let sieve_limit = ((2.0 * hi as f64).sqrt()) as u64 + 100;
+        let max_n: u128 = (lo as u128) + (len as u128) - 1;
+        let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
         let filter = BatchFilter::compute(lo, len, sieve.primes());
 
@@ -367,7 +381,8 @@ mod tests {
         let lo = 2u64;
         let len = 200usize;
         let hi = lo + len as u64;
-        let sieve_limit = ((2.0 * hi as f64).sqrt()) as u64 + 100;
+        let max_n: u128 = (lo as u128) + (len as u128) - 1;
+        let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
         let fused = FusedBatchResult::compute(lo, len, sieve.primes());
@@ -390,7 +405,8 @@ mod tests {
         let lo = 10_000u64;
         let len = 5_000usize;
         let hi = lo + len as u64;
-        let sieve_limit = ((2.0 * hi as f64).sqrt()) as u64 + 100;
+        let max_n: u128 = (lo as u128) + (len as u128) - 1;
+        let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
         let fused = FusedBatchResult::compute(lo, len, sieve.primes());
@@ -408,7 +424,11 @@ mod tests {
                 );
             }
         }
-        assert_eq!(mismatches, 0, "Found {} mismatches in [{}..{})", mismatches, lo, hi);
+        assert_eq!(
+            mismatches, 0,
+            "Found {} mismatches in [{}..{})",
+            mismatches, lo, hi
+        );
     }
 
     #[test]
@@ -417,7 +437,8 @@ mod tests {
         let lo = 339_949_240u64;
         let len = 20usize;
         let hi = lo + len as u64;
-        let sieve_limit = ((2.0 * hi as f64).sqrt()) as u64 + 100;
+        let max_n: u128 = (lo as u128) + (len as u128) - 1;
+        let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
         let fused = FusedBatchResult::compute(lo, len, sieve.primes());
@@ -436,11 +457,43 @@ mod tests {
     }
 
     #[test]
+    fn test_fused_exact_match_25t_scale() {
+        // Test at the top end of the k=13 exhaustive search range (~25T).
+        let lo = 24_999_999_999_900u64;
+        let len = 20usize;
+        let hi = lo + len as u64;
+        let max_n: u128 = (lo as u128) + (len as u128) - 1;
+        let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
+        let sieve = PrimeSieve::new(sieve_limit);
+
+        let fused = FusedBatchResult::compute(lo, len, sieve.primes());
+        let checker = GovernorChecker::with_sieve(sieve);
+
+        for i in 0..len {
+            let n = lo + i as u64;
+            let expected = checker.is_governor(n);
+            assert_eq!(
+                fused.is_governor[i], expected,
+                "Fused disagrees at n={}: fused={}, expected={}",
+                n, fused.is_governor[i], expected
+            );
+        }
+
+        // Also sanity-check that the direct checker could factor the entire range.
+        assert!(
+            checker.sieve().can_factor(hi),
+            "Test sieve should be sufficient to factor n up to {}",
+            hi
+        );
+    }
+
+    #[test]
     fn test_fused_governor_count_matches() {
         let lo = 100_000u64;
         let len = 10_000usize;
         let hi = lo + len as u64;
-        let sieve_limit = ((2.0 * hi as f64).sqrt()) as u64 + 100;
+        let max_n: u128 = (lo as u128) + (len as u128) - 1;
+        let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
         let fused = FusedBatchResult::compute(lo, len, sieve.primes());
@@ -458,17 +511,19 @@ mod tests {
     fn test_fused_stats_add_up() {
         let lo = 50_000u64;
         let len = 10_000usize;
-        let hi = lo + len as u64;
-        let sieve_limit = ((2.0 * hi as f64).sqrt()) as u64 + 100;
+        let max_n: u128 = (lo as u128) + (len as u128) - 1;
+        let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
         let fused = FusedBatchResult::compute(lo, len, sieve.primes());
 
         // governor_count + rejected should equal len (minus edge cases)
-        let total_rejected = fused.rejected_odd_prime + fused.rejected_large_pf + fused.rejected_vp_fail;
+        let total_rejected =
+            fused.rejected_odd_prime + fused.rejected_large_pf + fused.rejected_vp_fail;
         // Some numbers at the very start might be edge cases (n<=1), but lo=50000 so no edge cases
         assert_eq!(
-            fused.governor_count + total_rejected, len,
+            fused.governor_count + total_rejected,
+            len,
             "Stats don't add up: governors={} + rejected({} + {} + {})={} != len={}",
             fused.governor_count,
             fused.rejected_odd_prime,

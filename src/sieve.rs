@@ -1,8 +1,9 @@
 //! Prime sieve implementation using the Sieve of Eratosthenes.
 //!
-//! For searching up to n ~ 10^10, we need primes up to sqrt(n) ~ 100,000.
+//! For searching up to n ~ 10^13–10^14, we need primes up to sqrt(n) ~ a few million.
 //! This sieve is computed once at startup and shared across all workers.
 
+use crate::int_math::isqrt_u64;
 use std::sync::Arc;
 
 /// A precomputed prime sieve for fast factorization.
@@ -39,7 +40,7 @@ impl PrimeSieve {
     /// This automatically computes the required limit as sqrt(max_n) + buffer.
     pub fn for_range(max_n: u64) -> Self {
         // sqrt(max_n) + 1000 for safety margin
-        let limit = ((max_n as f64).sqrt() as u64) + 1000;
+        let limit = isqrt_u64(max_n).saturating_add(1000);
         Self::new(limit)
     }
 
@@ -70,7 +71,7 @@ impl PrimeSieve {
     /// Check if this sieve is sufficient for factoring `n`.
     #[inline]
     pub fn can_factor(&self, n: u64) -> bool {
-        let sqrt_n = (n as f64).sqrt() as u64;
+        let sqrt_n = isqrt_u64(n);
         sqrt_n <= self.limit
     }
 }
@@ -89,7 +90,7 @@ fn sieve_of_eratosthenes(limit: usize) -> Vec<u64> {
     is_prime[1] = false;
 
     // Only need to sieve up to sqrt(limit)
-    let sqrt_limit = (limit as f64).sqrt() as usize;
+    let sqrt_limit = isqrt_u64(limit as u64) as usize;
 
     for i in 2..=sqrt_limit {
         if is_prime[i] {
@@ -144,13 +145,7 @@ pub fn segmented_sieve(low: u64, high: u64, base_primes: &[u64]) -> Vec<u64> {
     is_prime
         .iter()
         .enumerate()
-        .filter_map(|(i, &is_p)| {
-            if is_p {
-                Some(low + i as u64)
-            } else {
-                None
-            }
-        })
+        .filter_map(|(i, &is_p)| if is_p { Some(low + i as u64) } else { None })
         .collect()
 }
 
@@ -177,6 +172,10 @@ mod tests {
         // π(10000) = 1229
         let sieve = PrimeSieve::new(10000);
         assert_eq!(sieve.len(), 1229);
+
+        // π(1_000_000) = 78498
+        let sieve = PrimeSieve::new(1_000_000);
+        assert_eq!(sieve.len(), 78_498);
     }
 
     #[test]
