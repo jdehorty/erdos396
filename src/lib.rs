@@ -15,6 +15,7 @@
 //! - **Early-exit governor check**: Interleaves p-adic check with factorization
 //! - **√(2n) barrier**: Immediate rejection when largest prime factor > √(2n)
 
+pub mod build_info;
 pub mod checkpoint;
 pub mod factor;
 pub mod governor;
@@ -25,6 +26,7 @@ pub mod sieve;
 pub mod verify;
 
 // Re-export main types for convenience
+pub use build_info::BuildInfo;
 pub use checkpoint::{Checkpoint, CheckpointManager, CounterExampleInfo, RunLogger};
 pub use factor::Factorization;
 pub use governor::GovernorChecker;
