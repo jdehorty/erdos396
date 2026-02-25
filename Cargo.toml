@@ -25,6 +25,10 @@ path = "src/bin/verify.rs"
 name = "validate"
 path = "src/bin/validate.rs"
 
+[[bin]]
+name = "audit_runs"
+path = "src/bin/audit_runs.rs"
+
 [dependencies]
 # Parallelism
 rayon = "1.10"
