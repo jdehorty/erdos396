@@ -196,7 +196,10 @@ pub fn vp_factorial(n: u64, p: u64) -> u64 {
 /// This is the p-adic "supply" from the central binomial coefficient.
 #[inline]
 pub fn vp_central_binom(n: u64, p: u64) -> u64 {
-    vp_factorial(2 * n, p) - 2 * vp_factorial(n, p)
+    let two_n = n
+        .checked_mul(2)
+        .expect("vp_central_binom requires 2n to fit in u64");
+    vp_factorial(two_n, p) - 2 * vp_factorial(n, p)
 }
 
 /// Fast v_2(C(2n, n)) using Kummer's theorem: equals popcount(n).
@@ -267,13 +270,18 @@ pub fn vp_central_binom_p5(n: u64) -> u64 {
 /// slower per-iteration than the specialized p=3,5 functions.
 #[inline(always)]
 pub fn vp_central_binom_kummer_fast(n: u64, p: u64) -> u64 {
+    debug_assert!(p >= 2, "p must be at least 2");
     let mut carries = 0u64;
     let mut n_remaining = n;
     let mut carry = 0u64;
+    // Avoid overflow in `2*digit + carry` by using threshold comparisons.
+    // carry_out = 1  iff  2*digit + carry_in ≥ p.
+    let half = p / 2;
+    let half_up = half + (p & 1); // ceil(p/2)
     while n_remaining > 0 {
         let digit = n_remaining % p;
-        let sum = 2 * digit + carry;
-        carry = (sum >= p) as u64;
+        let threshold = if carry == 0 { half_up } else { half };
+        carry = (digit >= threshold) as u64;
         carries += carry;
         n_remaining /= p;
     }
@@ -305,6 +313,15 @@ pub fn vp_central_binom_kummer(n: u64, p: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lcg_next(state: &mut u64) -> u64 {
+        // Deterministic pseudo-random generator (no external deps).
+        // Constants from PCG-style LCGs; good enough for test sampling.
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state
+    }
 
     #[test]
     fn test_vp_factorial() {
@@ -349,9 +366,9 @@ mod tests {
         for &n in &[
             10_000_000_000u64,
             10_000_000_001,
-            339_949_252,       // k=8 witness
-            17_609_764_993,    // k=9 witness
-            u64::MAX / 2 - 1,  // near overflow boundary
+            339_949_252,      // k=8 witness
+            17_609_764_993,   // k=9 witness
+            u64::MAX / 2 - 1, // near overflow boundary
         ] {
             let legendre = vp_central_binom(n, 2);
             let popcount = vp_central_binom_p2(n);
@@ -416,11 +433,19 @@ mod tests {
         ] {
             let l3 = vp_central_binom(n, 3);
             let k3 = vp_central_binom_p3(n);
-            assert_eq!(l3, k3, "p=3 mismatch at n={}: Legendre={}, Kummer={}", n, l3, k3);
+            assert_eq!(
+                l3, k3,
+                "p=3 mismatch at n={}: Legendre={}, Kummer={}",
+                n, l3, k3
+            );
 
             let l5 = vp_central_binom(n, 5);
             let k5 = vp_central_binom_p5(n);
-            assert_eq!(l5, k5, "p=5 mismatch at n={}: Legendre={}, Kummer={}", n, l5, k5);
+            assert_eq!(
+                l5, k5,
+                "p=5 mismatch at n={}: Legendre={}, Kummer={}",
+                n, l5, k5
+            );
         }
     }
 
@@ -458,17 +483,40 @@ mod tests {
     }
 
     #[test]
+    fn test_kummer_fast_matches_legendre_random_large() {
+        // Random sampling at the 10^13 scale (k=13 search range).
+        let primes = [2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 97, 997];
+        let max_n = 25_000_000_000_000u64;
+
+        let mut state = 0x3d2c_ba98_7c01_4e55u64;
+        for _ in 0..2000 {
+            let n = (lcg_next(&mut state) % max_n).saturating_add(1);
+            let p = primes[(lcg_next(&mut state) as usize) % primes.len()];
+
+            let legendre = vp_central_binom(n, p);
+            let kummer = match p {
+                2 => vp_central_binom_p2(n),
+                3 => vp_central_binom_p3(n),
+                5 => vp_central_binom_p5(n),
+                _ => vp_central_binom_kummer_fast(n, p),
+            };
+
+            assert_eq!(
+                legendre, kummer,
+                "Random mismatch at n={}, p={}: Legendre={}, Kummer={}",
+                n, p, legendre, kummer
+            );
+        }
+    }
+
+    #[test]
     fn test_governor_membership() {
         let checker = GovernorChecker::new(1000);
 
         // n ∈ G iff n | C(2n, n)
         let members = [1, 2, 6, 20];
         for &n in &members {
-            assert!(
-                checker.is_governor(n),
-                "{} should be in Governor Set",
-                n
-            );
+            assert!(checker.is_governor(n), "{} should be in Governor Set", n);
             assert!(
                 checker.is_governor_fast(n),
                 "{} should be in Governor Set (fast)",
@@ -535,7 +583,10 @@ mod tests {
             );
 
             if actual_len > 9 {
-                println!("  *** FOUND EXTENSION: run at {} is actually {} ***", end_pos, actual_len);
+                println!(
+                    "  *** FOUND EXTENSION: run at {} is actually {} ***",
+                    end_pos, actual_len
+                );
             }
 
             let start_pos = end_pos - (actual_len as u64 - 1);
