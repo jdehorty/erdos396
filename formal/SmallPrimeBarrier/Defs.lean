@@ -1,5 +1,5 @@
 import Mathlib.Data.Nat.Choose.Central
-import Mathlib.NumberTheory.Padics.PadicVal
+import Mathlib.NumberTheory.Padics.PadicVal.Basic
 
 namespace Erdos396
 

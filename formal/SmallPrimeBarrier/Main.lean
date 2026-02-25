@@ -4,7 +4,7 @@ import Mathlib.NumberTheory.Bertrand
 /-!
 # The Small Prime Barrier Theorem
 
-*Reference:* `compute/docs/small_prime_barrier_theorem.md`
+*Reference:* `docs/small_prime_barrier.md` (repo root).
 
 This file formalizes the **Small Prime Barrier Theorem** for Erdős Problem #396:
 if a k-witness contains a block term that fails the governor test at some prime q,

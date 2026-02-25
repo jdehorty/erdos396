@@ -1,6 +1,7 @@
 name = "SmallPrimeBarrier"
 version = "0.1.0"
 keywords = ["number-theory", "erdos", "combinatorics"]
+defaultTargets = ["SmallPrimeBarrier"]
 
 [[require]]
 name = "mathlib"
