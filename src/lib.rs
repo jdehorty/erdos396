@@ -18,6 +18,7 @@
 pub mod checkpoint;
 pub mod factor;
 pub mod governor;
+mod int_math;
 pub mod prefilter;
 pub mod search;
 pub mod sieve;
