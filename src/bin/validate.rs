@@ -866,31 +866,38 @@ fn main() -> anyhow::Result<()> {
                         state.small_prime_candidates += 1;
                         total_candidates.fetch_add(1, Ordering::Relaxed);
 
-                        let result = match verifier.verify(k, n) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                audit_error.store(true, Ordering::Relaxed);
-                                let mut msg = audit_message.lock().unwrap();
-                                if msg.is_none() {
-                                    *msg = Some(format!(
-                                        "Internal verification error at n={}: {}",
-                                        n, e
-                                    ));
-                                }
-                                break;
-                            }
-                        };
-                        if result.is_valid {
-                            log::error!(
-                                "*** CONFIRMED WITNESS: k={}, n={} (worker {}) ***",
-                                k,
-                                n,
-                                worker_id
-                            );
-                            state.confirmed_witnesses.push(n);
-                            total_witnesses.fetch_add(1, Ordering::Relaxed);
-                        } else {
+                        // Secondary screen: check block terms at large primes.
+                        // Sound by the same barrier theorem — much cheaper than
+                        // full verification because we bail on first failure.
+                        if !block_passes_large_prime_screen(n, k, &screen_primes) {
                             state.false_alarms += 1;
+                        } else {
+                            let result = match verifier.verify(k, n) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    audit_error.store(true, Ordering::Relaxed);
+                                    let mut msg = audit_message.lock().unwrap();
+                                    if msg.is_none() {
+                                        *msg = Some(format!(
+                                            "Internal verification error at n={}: {}",
+                                            n, e
+                                        ));
+                                    }
+                                    break;
+                                }
+                            };
+                            if result.is_valid {
+                                log::error!(
+                                    "*** CONFIRMED WITNESS: k={}, n={} (worker {}) ***",
+                                    k,
+                                    n,
+                                    worker_id
+                                );
+                                state.confirmed_witnesses.push(n);
+                                total_witnesses.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                state.false_alarms += 1;
+                            }
                         }
                     }
 
