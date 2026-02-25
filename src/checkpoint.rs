@@ -11,6 +11,12 @@
 //! - **Run log** (`runs_k{K}_w{NN}.jsonl`): Append-only, one JSON line per
 //!   significant run. Each run written once when discovered, never rewritten.
 //!
+//! ## v4 Addendum (2026-02-23)
+//!
+//! v4 adds simple **coverage invariants** (`sum_checked`, `xor_checked`) to the
+//! checkpoint file. These detect accidental gaps/overlaps if the scan loop ever
+//! fails to enumerate exactly the intended range.
+//!
 //! This eliminates the I/O bottleneck caused by v2's cumulative snapshots,
 //! which grew to 34+ MB as significant_runs accumulated.
 
@@ -21,6 +27,34 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+
+mod serde_u128_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Str(String),
+        Num(u64),
+    }
+
+    pub fn serialize<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Repr::deserialize(deserializer)? {
+            Repr::Str(s) => s.parse::<u128>().map_err(serde::de::Error::custom),
+            Repr::Num(n) => Ok(n as u128),
+        }
+    }
+}
 
 /// Checkpoint data for a search worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,8 +71,29 @@ pub struct Checkpoint {
     /// Current position in search
     pub current_pos: u64,
 
+    /// Length of the current consecutive-Governor run ending at `current_pos - 1`.
+    ///
+    /// This is persisted so that resuming from a checkpoint cannot miss runs that
+    /// cross a checkpoint boundary.
+    #[serde(default)]
+    pub current_run: usize,
+
+    /// Starting position of the current run (meaningful when `current_run > 0`).
+    #[serde(default)]
+    pub current_run_start: u64,
+
     /// Number of integers checked so far
     pub checked: u64,
+
+    /// Sum of all checked `n` values (coverage invariant).
+    ///
+    /// Serialized as a string to avoid integer-width loss in generic JSON parsers.
+    #[serde(default, with = "serde_u128_string")]
+    pub sum_checked: u128,
+
+    /// XOR of all checked `n` values (coverage invariant).
+    #[serde(default)]
+    pub xor_checked: u64,
 
     /// Number of Governor Set members found
     pub governor_count: u64,
@@ -101,11 +156,11 @@ pub struct Checkpoint {
 }
 
 fn default_version() -> u32 {
-    3  // v3: decoupled run logging
+    4 // v4: v3 + coverage invariants
 }
 
 fn default_significant_threshold() -> usize {
-    6  // Record all runs of 6+ consecutive governors
+    6 // Record all runs of 6+ consecutive governors
 }
 
 /// Detailed information about a false positive (Governor run that fails verification).
@@ -162,7 +217,11 @@ impl Checkpoint {
             start,
             end,
             current_pos: start,
+            current_run: 0,
+            current_run_start: start,
             checked: 0,
+            sum_checked: 0,
+            xor_checked: 0,
             governor_count: 0,
             longest_run: 0,
             longest_run_start: start,
@@ -178,7 +237,7 @@ impl Checkpoint {
             safety_net_alerts: 0,
             timestamp: Utc::now(),
             worker_id: None,
-            version: 3,
+            version: 4,
         }
     }
 
@@ -299,7 +358,7 @@ impl Checkpoint {
 
         // Temporarily take significant_runs out, save slim, put back
         let runs = std::mem::take(&mut self.significant_runs);
-        self.version = 3;
+        self.version = 4;
         self.save(&tmp_path)?;
         self.significant_runs = runs;
 
@@ -438,6 +497,9 @@ impl CheckpointManager {
     pub fn update(&mut self, current_pos: u64, governor_found: bool) -> Result<bool> {
         self.checkpoint.current_pos = current_pos;
         self.checkpoint.checked += 1;
+        let n = current_pos.saturating_sub(1);
+        self.checkpoint.sum_checked += n as u128;
+        self.checkpoint.xor_checked ^= n;
         if governor_found {
             self.checkpoint.governor_count += 1;
         }
@@ -475,10 +537,18 @@ pub fn aggregate_checkpoints(checkpoints: &[Checkpoint]) -> AggregatedStats {
         stats.total_governor_count += cp.governor_count;
         stats.candidates.extend(cp.candidates.iter().copied());
         stats.witnesses.extend(cp.witnesses.iter().copied());
-        stats.false_positives.extend(cp.false_positives.iter().copied());
-        stats.false_positive_details.extend(cp.false_positive_details.iter().cloned());
-        stats.significant_runs.extend(cp.significant_runs.iter().cloned());
-        stats.counter_examples.extend(cp.counter_examples.iter().cloned());
+        stats
+            .false_positives
+            .extend(cp.false_positives.iter().copied());
+        stats
+            .false_positive_details
+            .extend(cp.false_positive_details.iter().cloned());
+        stats
+            .significant_runs
+            .extend(cp.significant_runs.iter().cloned());
+        stats
+            .counter_examples
+            .extend(cp.counter_examples.iter().cloned());
         stats.safety_net_windows_checked += cp.safety_net_windows_checked;
         stats.safety_net_alerts += cp.safety_net_alerts;
 
@@ -595,7 +665,7 @@ mod tests {
         // Load and verify significant_runs is empty in the file
         let loaded = Checkpoint::load(tmp.path()).unwrap();
         assert!(loaded.significant_runs.is_empty());
-        assert_eq!(loaded.version, 3);
+        assert_eq!(loaded.version, 4);
 
         // But the in-memory checkpoint still has them
         assert_eq!(cp.significant_runs.len(), 1);
@@ -606,8 +676,18 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         let mut logger = RunLogger::new(tmp.path()).unwrap();
 
-        let run1 = RunInfo { start: 1000, length: 6, is_witness: None, failing_prime: None };
-        let run2 = RunInfo { start: 2000, length: 7, is_witness: None, failing_prime: None };
+        let run1 = RunInfo {
+            start: 1000,
+            length: 6,
+            is_witness: None,
+            failing_prime: None,
+        };
+        let run2 = RunInfo {
+            start: 2000,
+            length: 7,
+            is_witness: None,
+            failing_prime: None,
+        };
 
         logger.log_run(&run1).unwrap();
         logger.log_run(&run2).unwrap();

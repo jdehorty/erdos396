@@ -7,10 +7,11 @@
 
 use crate::factor::Factorization;
 use crate::governor::{
-    vp_central_binom, vp_central_binom_kummer_fast, vp_central_binom_p2, vp_central_binom_p3,
-    vp_central_binom_p5, vp_factorial, GovernorChecker,
+    vp_central_binom_kummer_fast, vp_central_binom_p2, vp_central_binom_p3, vp_central_binom_p5,
+    vp_factorial, GovernorChecker,
 };
 use crate::sieve::PrimeSieve;
+use crate::{Error, Result};
 use std::collections::HashMap;
 
 /// Verifier for Erdős 396 witnesses.
@@ -37,16 +38,22 @@ impl WitnessVerifier {
     /// This checks: n(n-1)(n-2)···(n-k) | C(2n, n)
     ///
     /// Returns detailed verification result.
-    pub fn verify(&self, k: u32, n: u64) -> VerificationResult {
+    pub fn verify(&self, k: u32, n: u64) -> Result<VerificationResult> {
         // Check basic validity
         if n <= k as u64 {
-            return VerificationResult {
+            return Ok(VerificationResult {
                 is_valid: false,
                 is_governor_run: false,
                 failing_prime: None,
                 demand: HashMap::new(),
                 supply: HashMap::new(),
-            };
+            });
+        }
+        if n.checked_mul(2).is_none() {
+            return Err(Error::InvalidParameter(format!(
+                "n too large: 2n overflows u64 (n={})",
+                n
+            )));
         }
 
         // First check if it's a Governor run (necessary condition based on conjecture)
@@ -69,7 +76,7 @@ impl WitnessVerifier {
         let mut failing_prime = None;
 
         for (&p, &required) in &demand {
-            let available = vp_central_binom(n, p);
+            let available = vp_supply_checked(n, p)?;
             supply.insert(p, available);
 
             if required > available && failing_prime.is_none() {
@@ -77,20 +84,20 @@ impl WitnessVerifier {
             }
         }
 
-        VerificationResult {
+        Ok(VerificationResult {
             is_valid: failing_prime.is_none(),
             is_governor_run,
             failing_prime,
             demand,
             supply,
-        }
+        })
     }
 
     /// Quick check if n is a valid k-witness (without detailed results).
     #[inline]
-    pub fn is_witness(&self, k: u32, n: u64) -> bool {
+    pub fn is_witness(&self, k: u32, n: u64) -> Result<bool> {
         if n <= k as u64 {
-            return false;
+            return Ok(false);
         }
 
         // Collect all prime factors from the block
@@ -106,51 +113,68 @@ impl WitnessVerifier {
 
         // Check supply >= demand for each prime
         for (p, required) in demand {
-            let available = vp_central_binom(n, p);
+            let available = vp_supply_checked(n, p)?;
             if required > available {
-                return false;
+                return Ok(false);
             }
         }
 
-        true
+        Ok(true)
     }
 
     /// Fast verification using Kummer carry-monotonicity theorem.
     ///
-    /// For a full governor run of length k+1, primes p > k are automatically
-    /// satisfied. So we only need to check primes p <= k. For k=9, that's
-    /// just {2, 3, 5, 7} — 4 primes, no factoring needed.
+    /// Intended for *governor-run candidates* (i.e., all `k+1` block terms are
+    /// in the Governor Set).
+    ///
+    /// For a governor run, primes `p ≥ 2k+1` are automatically satisfied:
+    /// among `k+1` consecutive integers at most one is divisible by such a `p`,
+    /// and carry-invariance gives `v_p(C(2n,n)) = v_p(C(2(n-j), n-j))` when
+    /// `p ∣ (n-j)` and `j ≤ k ≤ (p-1)/2`. So it suffices to check only the
+    /// **barrier primes** `p < 2k+1`.
     ///
     /// Demand is computed via Legendre's formula on the block product:
     ///   demand_p = v_p(n!) - v_p((n-k-1)!)
     /// Supply is computed via Kummer dispatch.
-    pub fn verify_fast(&self, k: u32, n: u64) -> VerificationResult {
+    pub fn verify_fast(&self, k: u32, n: u64) -> Result<VerificationResult> {
         if n <= k as u64 {
-            return VerificationResult {
+            return Ok(VerificationResult {
                 is_valid: false,
                 is_governor_run: false,
                 failing_prime: None,
                 demand: HashMap::new(),
                 supply: HashMap::new(),
-            };
+            });
+        }
+        if n.checked_mul(2).is_none() {
+            return Err(Error::InvalidParameter(format!(
+                "n too large: 2n overflows u64 (n={})",
+                n
+            )));
         }
 
         let checker = GovernorChecker::with_sieve(self.sieve.clone());
         let is_governor_run = checker.is_governor_run(n, k);
+        if !is_governor_run {
+            // `verify_fast` is only sound as a verifier for governor-run candidates.
+            // Fall back to the full verifier to avoid false positives.
+            return self.verify(k, n);
+        }
 
-        let small_primes = primes_up_to(k);
+        let barrier_threshold = k.saturating_mul(2);
+        let barrier_primes = primes_up_to(barrier_threshold);
         let mut demand: HashMap<u64, u64> = HashMap::new();
         let mut supply: HashMap<u64, u64> = HashMap::new();
         let mut failing_prime = None;
 
         let block_bottom = n - k as u64; // n-k is lowest term, block is n(n-1)...(n-k)
 
-        for p in &small_primes {
+        for p in &barrier_primes {
             let p = *p;
             // demand_p = v_p(n!) - v_p((n-k-1)!)
             // This equals sum of v_p(term) for term in [n-k, n]
             let d = vp_factorial(n, p) - vp_factorial(block_bottom.saturating_sub(1), p);
-            let s = vp_supply(n, p);
+            let s = vp_supply_checked(n, p)?;
 
             demand.insert(p, d);
             supply.insert(p, s);
@@ -160,59 +184,72 @@ impl WitnessVerifier {
             }
         }
 
-        VerificationResult {
+        Ok(VerificationResult {
             is_valid: failing_prime.is_none(),
             is_governor_run,
             failing_prime,
             demand,
             supply,
-        }
+        })
     }
 
-    /// Quick boolean check using fast verification (small primes only).
+    /// Quick boolean check for governor-run candidates (barrier primes only).
     #[inline]
-    pub fn is_witness_fast(&self, k: u32, n: u64) -> bool {
+    pub fn is_witness_fast(&self, k: u32, n: u64) -> Result<bool> {
         if n <= k as u64 {
-            return false;
+            return Ok(false);
+        }
+        if n.checked_mul(2).is_none() {
+            return Err(Error::InvalidParameter(format!(
+                "n too large: 2n overflows u64 (n={})",
+                n
+            )));
         }
 
-        let small_primes = primes_up_to(k);
+        let checker = GovernorChecker::with_sieve(self.sieve.clone());
+        if !checker.is_governor_run(n, k) {
+            return self.is_witness(k, n);
+        }
+
+        let barrier_threshold = k.saturating_mul(2);
+        let barrier_primes = primes_up_to(barrier_threshold);
         let block_bottom = n - k as u64;
 
-        for &p in &small_primes {
+        for &p in &barrier_primes {
             let d = vp_factorial(n, p) - vp_factorial(block_bottom.saturating_sub(1), p);
-            let s = vp_supply(n, p);
+            let s = vp_supply_checked(n, p)?;
             if d > s {
-                return false;
+                return Ok(false);
             }
         }
 
-        true
+        Ok(true)
     }
 
-    /// Check small primes for a block starting at n with k+1 terms.
+    /// Check barrier primes `p < 2k+1` for a block starting at n with k+1 terms.
     ///
-    /// Returns `None` if all small primes pass, `Some(p)` for the first
+    /// Returns `None` if all barrier primes pass, `Some(p)` for the first
     /// failing prime. Used by safety-net mode to detect potential
     /// counter-examples.
     #[inline]
-    pub fn check_small_primes(&self, k: u32, n: u64) -> Option<u64> {
+    pub fn check_small_primes(&self, k: u32, n: u64) -> Result<Option<u64>> {
         if n <= k as u64 {
-            return Some(2); // trivially fails
+            return Ok(Some(2)); // trivially fails
         }
 
-        let small_primes = primes_up_to(k);
+        let barrier_threshold = k.saturating_mul(2);
+        let barrier_primes = primes_up_to(barrier_threshold);
         let block_bottom = n - k as u64;
 
-        for &p in &small_primes {
+        for &p in &barrier_primes {
             let d = vp_factorial(n, p) - vp_factorial(block_bottom.saturating_sub(1), p);
-            let s = vp_supply(n, p);
+            let s = vp_supply_checked(n, p)?;
             if d > s {
-                return Some(p);
+                return Ok(Some(p));
             }
         }
 
-        None
+        Ok(None)
     }
 }
 
@@ -225,6 +262,27 @@ fn vp_supply(n: u64, p: u64) -> u64 {
         5 => vp_central_binom_p5(n),
         _ => vp_central_binom_kummer_fast(n, p),
     }
+}
+
+#[inline]
+fn vp_central_binom_legendre_checked(n: u64, p: u64) -> Result<u64> {
+    let two_n = n.checked_mul(2).ok_or_else(|| {
+        Error::InvalidParameter(format!("n too large: 2n overflows u64 (n={})", n))
+    })?;
+    Ok(vp_factorial(two_n, p) - 2 * vp_factorial(n, p))
+}
+
+#[inline]
+fn vp_supply_checked(n: u64, p: u64) -> Result<u64> {
+    let legendre = vp_central_binom_legendre_checked(n, p)?;
+    let kummer = vp_supply(n, p);
+    if legendre != kummer {
+        return Err(Error::Audit(format!(
+            "internal inconsistency: supply mismatch at n={}, p={}: Legendre={}, Kummer={}",
+            n, p, legendre, kummer
+        )));
+    }
+    Ok(legendre)
 }
 
 /// Return all primes up to k (tiny sieve, only used for small k).
@@ -301,7 +359,10 @@ impl VerificationResult {
             let d = self.demand.get(p).unwrap_or(&0);
             let sup = self.supply.get(p).unwrap_or(&0);
             let status = if d <= sup { "✓" } else { "✗" };
-            s.push_str(&format!("    p={}: demand={}, supply={} {}\n", p, d, sup, status));
+            s.push_str(&format!(
+                "    p={}: demand={}, supply={} {}\n",
+                p, d, sup, status
+            ));
         }
 
         if primes.len() > 10 {
@@ -313,26 +374,39 @@ impl VerificationResult {
 }
 
 /// Verify all known OEIS witnesses for correctness.
-pub fn verify_known_witnesses() -> Vec<(u32, u64, bool)> {
+pub fn verify_known_witnesses() -> Result<Vec<(u32, u64, bool)>> {
     use crate::KNOWN_WITNESSES;
 
-    let max_n = KNOWN_WITNESSES.iter().map(|(_, n)| *n).max().unwrap_or(1000);
+    let max_n = KNOWN_WITNESSES
+        .iter()
+        .map(|(_, n)| *n)
+        .max()
+        .unwrap_or(1000);
     let verifier = WitnessVerifier::new(max_n);
 
-    KNOWN_WITNESSES
-        .iter()
-        .map(|&(k, n)| (k, n, verifier.is_witness(k, n)))
-        .collect()
+    let mut out = Vec::with_capacity(KNOWN_WITNESSES.len());
+    for &(k, n) in KNOWN_WITNESSES {
+        out.push((k, n, verifier.is_witness(k, n)?));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::factor::vp as vp_term;
     use crate::KNOWN_WITNESSES;
+
+    fn lcg_next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state
+    }
 
     #[test]
     fn test_known_witnesses() {
-        let results = verify_known_witnesses();
+        let results = verify_known_witnesses().unwrap();
 
         for (k, n, is_valid) in results {
             assert!(is_valid, "Known witness k={}, n={} should be valid", k, n);
@@ -344,7 +418,7 @@ mod tests {
         let verifier = WitnessVerifier::new(1_000_000_000);
 
         // k=8 witness
-        let result = verifier.verify(8, 339_949_252);
+        let result = verifier.verify(8, 339_949_252).unwrap();
         assert!(result.is_valid);
         assert!(result.is_governor_run);
         assert!(result.failing_prime.is_none());
@@ -357,7 +431,7 @@ mod tests {
         let verifier = WitnessVerifier::new(100_000);
 
         // n=30592 is mentioned as a Governor run of 3 but NOT a valid k=2 witness
-        let result = verifier.verify(2, 30592);
+        let result = verifier.verify(2, 30592).unwrap();
 
         // It should be a governor run but not a valid witness
         // (This is the expected false positive case)
@@ -372,7 +446,7 @@ mod tests {
         let verifier = WitnessVerifier::new(1000);
 
         // n=100 should not be a k=3 witness
-        let result = verifier.verify(3, 100);
+        let result = verifier.verify(3, 100).unwrap();
         assert!(!result.is_valid);
     }
 
@@ -391,12 +465,16 @@ mod tests {
 
     #[test]
     fn test_verify_fast_matches_full_for_known_witnesses() {
-        let max_n = KNOWN_WITNESSES.iter().map(|(_, n)| *n).max().unwrap_or(1000);
+        let max_n = KNOWN_WITNESSES
+            .iter()
+            .map(|(_, n)| *n)
+            .max()
+            .unwrap_or(1000);
         let verifier = WitnessVerifier::new(max_n);
 
         for &(k, n) in KNOWN_WITNESSES {
-            let full = verifier.verify(k, n);
-            let fast = verifier.verify_fast(k, n);
+            let full = verifier.verify(k, n).unwrap();
+            let fast = verifier.verify_fast(k, n).unwrap();
 
             assert_eq!(
                 full.is_valid, fast.is_valid,
@@ -418,13 +496,12 @@ mod tests {
         let k = 9u32;
         let verifier = WitnessVerifier::new(n);
 
-        let fast = verifier.verify_fast(k, n);
-        assert!(!fast.is_valid, "Known false positive should fail fast verify");
-        assert_eq!(
-            fast.failing_prime,
-            Some(3),
-            "Should fail at p=3"
+        let fast = verifier.verify_fast(k, n).unwrap();
+        assert!(
+            !fast.is_valid,
+            "Known false positive should fail fast verify"
         );
+        assert_eq!(fast.failing_prime, Some(3), "Should fail at p=3");
     }
 
     #[test]
@@ -435,8 +512,8 @@ mod tests {
         let checker = GovernorChecker::with_sieve(PrimeSieve::for_range(100_000));
         for n in 3..=10_000u64 {
             if checker.is_governor_run(n, 2) {
-                let full = verifier.is_witness(2, n);
-                let fast = verifier.is_witness_fast(2, n);
+                let full = verifier.is_witness(2, n).unwrap();
+                let fast = verifier.is_witness_fast(2, n).unwrap();
                 assert_eq!(
                     full, fast,
                     "is_witness vs is_witness_fast disagree at n={}: full={}, fast={}",
@@ -448,15 +525,21 @@ mod tests {
 
     #[test]
     fn test_check_small_primes_known_witnesses() {
-        let max_n = KNOWN_WITNESSES.iter().map(|(_, n)| *n).max().unwrap_or(1000);
+        let max_n = KNOWN_WITNESSES
+            .iter()
+            .map(|(_, n)| *n)
+            .max()
+            .unwrap_or(1000);
         let verifier = WitnessVerifier::new(max_n);
 
         for &(k, n) in KNOWN_WITNESSES {
-            let result = verifier.check_small_primes(k, n);
+            let result = verifier.check_small_primes(k, n).unwrap();
             assert!(
                 result.is_none(),
                 "Known witness k={}, n={} should pass check_small_primes, but failed at p={:?}",
-                k, n, result
+                k,
+                n,
+                result
             );
         }
     }
@@ -467,7 +550,7 @@ mod tests {
         let k = 9u32;
         let verifier = WitnessVerifier::new(n);
 
-        let result = verifier.check_small_primes(k, n);
+        let result = verifier.check_small_primes(k, n).unwrap();
         assert_eq!(result, Some(3), "Should detect failure at p=3");
     }
 
@@ -479,14 +562,39 @@ mod tests {
         // Check all governor runs of 3+ in [100, 10000] for k=2
         for n in 102..=10_000u64 {
             if checker.is_governor_run(n, 2) {
-                let full = verifier.verify(2, n);
-                let fast = verifier.verify_fast(2, n);
+                let full = verifier.verify(2, n).unwrap();
+                let fast = verifier.verify_fast(2, n).unwrap();
                 assert_eq!(
                     full.is_valid, fast.is_valid,
                     "Disagree at n={}: full={}, fast={}",
                     n, full.is_valid, fast.is_valid
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_block_demand_sum_matches_factorial_difference() {
+        // Sanity check for the core demand identity used by `validate` and `verify_fast`:
+        //   v_p(∏_{i=0..k} (n-i)) = v_p(n!) - v_p((n-k-1)!)
+        let primes = [2u64, 3, 5, 7, 11, 13, 17, 19, 23];
+        let mut state = 0x8d9a_aa52_2f6d_c7b1u64;
+
+        for _ in 0..2000 {
+            let k = (lcg_next(&mut state) % 20) as u32;
+            let n = (lcg_next(&mut state) % 1_000_000_000_000u64).saturating_add(k as u64 + 1);
+            let p = primes[(lcg_next(&mut state) as usize) % primes.len()];
+
+            let sum_demand: u64 = (0..=k).map(|i| vp_term(n - i as u64, p) as u64).sum();
+
+            let block_bottom = n - k as u64;
+            let legendre_demand = vp_factorial(n, p) - vp_factorial(block_bottom - 1, p);
+
+            assert_eq!(
+                sum_demand, legendre_demand,
+                "Demand mismatch at n={}, k={}, p={}: sum={}, factorial_diff={}",
+                n, k, p, sum_demand, legendre_demand
+            );
         }
     }
 }

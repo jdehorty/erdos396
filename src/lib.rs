@@ -19,7 +19,7 @@ pub mod build_info;
 pub mod checkpoint;
 pub mod factor;
 pub mod governor;
-mod int_math;
+pub mod int_math;
 pub mod prefilter;
 pub mod search;
 pub mod sieve;
@@ -45,11 +45,11 @@ pub const KNOWN_WITNESSES: &[(u32, u64)] = &[
     (6, 7_979_090),
     (7, 101_130_029),
     (8, 339_949_252),
-    (9, 17_609_764_993),  // Found 2025-01-20! (run of 11 governors)
-    (10, 17_609_764_994), // Found 2025-01-20! (same run of 11!)
-    (11, 1_070_858_041_585),   // Found 2026-02-09 (run of 12)
-    (12, 5_048_891_644_646),   // Found 2026-02-11 (run of 13)
-    (13, 18_253_129_921_842),  // Found 2026-02-16, confirmed 2026-02-21 (run of 14, exhaustive 15T-25T)
+    (9, 17_609_764_993),      // Found 2025-01-20! (run of 11 governors)
+    (10, 17_609_764_994),     // Found 2025-01-20! (same run of 11!)
+    (11, 1_070_858_041_585),  // Found 2026-02-09 (run of 12)
+    (12, 5_048_891_644_646),  // Found 2026-02-11 (run of 13)
+    (13, 18_253_129_921_842), // Found 2026-02-16, confirmed 2026-02-21 (run of 14, exhaustive 15T-25T)
 ];
 
 /// Known runs of 9 consecutive Governor Set members found during k=9 search
@@ -97,6 +97,9 @@ pub enum Error {
 
     #[error("Checkpoint error: {0}")]
     Checkpoint(String),
+
+    #[error("Audit failure: {0}")]
+    Audit(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

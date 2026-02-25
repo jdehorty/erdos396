@@ -10,7 +10,7 @@
 /// Uses a branch-free bit-by-bit algorithm (Hacker's Delight style) that works
 /// for all `u128` values without overflow.
 #[inline]
-pub(crate) fn isqrt_u128(n: u128) -> u128 {
+pub fn isqrt_u128(n: u128) -> u128 {
     if n < 2 {
         return n;
     }
@@ -39,13 +39,13 @@ pub(crate) fn isqrt_u128(n: u128) -> u128 {
 
 /// Floor square root: `⌊√n⌋` for `u64`.
 #[inline]
-pub(crate) fn isqrt_u64(n: u64) -> u64 {
+pub fn isqrt_u64(n: u64) -> u64 {
     isqrt_u128(n as u128) as u64
 }
 
 /// Floor square root: `⌊√(2n)⌋` computed exactly (no floating point).
 #[inline]
-pub(crate) fn isqrt_2n_u64(n: u64) -> u64 {
+pub fn isqrt_2n_u64(n: u64) -> u64 {
     isqrt_u128(2u128 * (n as u128)) as u64
 }
 

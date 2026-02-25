@@ -15,6 +15,7 @@
 
 use crate::checkpoint::{Checkpoint, RunLogger};
 use crate::governor::GovernorChecker;
+use crate::int_math::isqrt_u128;
 use crate::prefilter::FusedBatchResult;
 use crate::sieve::PrimeSieve;
 use crate::verify::WitnessVerifier;
@@ -29,6 +30,46 @@ use std::time::{Duration, Instant};
 /// Default batch size for fused sieve+governor processing.
 /// 1M numbers: remaining array = 8MB, fits in L3 cache.
 const DEFAULT_BATCH_SIZE: usize = 1_000_000;
+
+/// Sum of integers in `[a, b)` computed in `u128`.
+///
+/// This is exact for all `u64` inputs because `Σ_{n < 2^64} n < 2^127`.
+#[inline]
+fn sum_range_u128(a: u64, b: u64) -> u128 {
+    if b <= a {
+        return 0;
+    }
+    let count = (b - a) as u128;
+    let first_plus_last = a as u128 + (b - 1) as u128;
+    if count % 2 == 0 {
+        (count / 2) * first_plus_last
+    } else {
+        // If count is odd, `first_plus_last` must be even.
+        count * (first_plus_last / 2)
+    }
+}
+
+/// XOR of integers in `[0, n]` (inclusive).
+#[inline]
+fn xor_upto(n: u64) -> u64 {
+    match n & 3 {
+        0 => n,
+        1 => 1,
+        2 => n + 1,
+        _ => 0,
+    }
+}
+
+/// XOR of integers in `[a, b)`.
+#[inline]
+fn xor_range(a: u64, b: u64) -> u64 {
+    if b <= a {
+        return 0;
+    }
+    let hi = xor_upto(b - 1);
+    let lo = if a == 0 { 0 } else { xor_upto(a - 1) };
+    hi ^ lo
+}
 
 /// Configuration for a search operation.
 #[derive(Debug, Clone)]
@@ -65,6 +106,18 @@ pub struct SearchConfig {
 
     /// Whether to enable safety-net mode (detect potential counter-examples)
     pub safety_net: bool,
+
+    /// Startup cross-check samples for the fused sieve path (0 disables).
+    ///
+    /// When enabled, each worker samples random `n` values in its assigned range
+    /// and checks that the fused sieve result matches the direct governor test.
+    pub fused_self_check_samples: u32,
+
+    /// Periodically audit fused sieve results during the scan (0 disables).
+    ///
+    /// Every `fused_audit_interval` checked values per worker, validate that the
+    /// fused sieve membership agrees with the direct governor test at a sampled `n`.
+    pub fused_audit_interval: u64,
 }
 
 impl Default for SearchConfig {
@@ -81,6 +134,8 @@ impl Default for SearchConfig {
             no_prefilter: false,
             full_verify: false,
             safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
         }
     }
 }
@@ -136,6 +191,12 @@ pub struct SearchResult {
     pub prefilter_rejected_odd_prime: u64,
     pub prefilter_rejected_large_pf: u64,
     pub prefilter_rejected_vp_fail: u64,
+
+    /// Final worker checkpoints (one per worker).
+    ///
+    /// These include coverage invariants (`sum_checked`, `xor_checked`) and are useful
+    /// for producing reviewer-facing reports after long runs.
+    pub worker_checkpoints: Vec<Checkpoint>,
 }
 
 /// Global progress tracking for parallel search.
@@ -212,6 +273,12 @@ pub struct SearchWorker {
 
     /// Primes for the fused sieve (up to √(2·end))
     prefilter_primes: Arc<Vec<u64>>,
+
+    /// Startup cross-check samples for the fused sieve path (0 disables).
+    fused_self_check_samples: u32,
+
+    /// Periodic audit interval for fused sieve cross-checks (0 disables).
+    fused_audit_interval: u64,
 }
 
 impl SearchWorker {
@@ -226,6 +293,8 @@ impl SearchWorker {
         full_verify: bool,
         safety_net: bool,
         prefilter_primes: Arc<Vec<u64>>,
+        fused_self_check_samples: u32,
+        fused_audit_interval: u64,
     ) -> Self {
         Self {
             id,
@@ -237,20 +306,57 @@ impl SearchWorker {
             full_verify,
             safety_net,
             prefilter_primes,
+            fused_self_check_samples,
+            fused_audit_interval,
         }
+    }
+
+    #[inline]
+    fn lcg_next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state
+    }
+
+    fn run_fused_self_check(&self, start: u64, end: u64) -> Result<()> {
+        let samples = self.fused_self_check_samples;
+        if samples == 0 {
+            return Ok(());
+        }
+        let scan_size = end.saturating_sub(start);
+        if scan_size == 0 {
+            return Ok(());
+        }
+
+        let mut state =
+            0x9c9b_a3b2_4a3f_1d77u64 ^ (self.id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..samples {
+            let n = start + (Self::lcg_next(&mut state) % scan_size);
+            let fused = FusedBatchResult::compute(n, 1, &self.prefilter_primes).is_governor[0];
+            let direct = self.checker.is_governor(n);
+            if fused != direct {
+                return Err(crate::Error::Audit(format!(
+                    "Fused self-check mismatch (worker {}): n={}, fused={}, direct={}",
+                    self.id, n, fused, direct
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Search a range for Governor Set runs.
     fn search_range(
         &self,
-        start: u64,
-        end: u64,
         checkpoint: &mut Checkpoint,
         progress: &GlobalProgress,
         checkpoint_path: &PathBuf,
         checkpoint_interval: u64,
         run_logger: &mut RunLogger,
     ) -> Result<()> {
+        let start = checkpoint.start;
+        let end = checkpoint.end;
         let search_start = checkpoint.current_pos;
 
         log::info!(
@@ -262,10 +368,22 @@ impl SearchWorker {
             if self.use_fused { "fused" } else { "linear" }
         );
 
-        if self.use_fused {
+        if self.use_fused && self.fused_self_check_samples > 0 {
+            log::info!(
+                "Worker {} running fused self-check ({} samples)...",
+                self.id,
+                self.fused_self_check_samples
+            );
+            if let Err(e) = self.run_fused_self_check(start, end) {
+                progress.should_stop.store(true, Ordering::Relaxed);
+                return Err(e);
+            }
+            log::info!("Worker {} fused self-check passed.", self.id);
+        }
+
+        let result = if self.use_fused {
             self.search_fused(
                 search_start,
-                end,
                 checkpoint,
                 progress,
                 checkpoint_path,
@@ -275,14 +393,34 @@ impl SearchWorker {
         } else {
             self.search_linear(
                 search_start,
-                end,
                 checkpoint,
                 progress,
                 checkpoint_path,
                 checkpoint_interval,
                 run_logger,
             )
+        };
+
+        // If we weren't asked to stop early, assert full coverage of the worker range.
+        if result.is_ok() && !progress.should_stop.load(Ordering::Relaxed) {
+            let expected_checked = end.saturating_sub(start);
+            let expected_sum = sum_range_u128(start, end);
+            let expected_xor = xor_range(start, end);
+            if checkpoint.current_pos != end || checkpoint.checked != expected_checked {
+                return Err(crate::Error::Audit(format!(
+                    "Coverage mismatch (worker {}): checked={} (expected {}), current_pos={} (expected {})",
+                    self.id, checkpoint.checked, expected_checked, checkpoint.current_pos, end
+                )));
+            }
+            if checkpoint.sum_checked != expected_sum || checkpoint.xor_checked != expected_xor {
+                return Err(crate::Error::Audit(format!(
+                    "Coverage invariant mismatch (worker {}): sum_checked={} (expected {}), xor_checked={} (expected {})",
+                    self.id, checkpoint.sum_checked, expected_sum, checkpoint.xor_checked, expected_xor
+                )));
+            }
         }
+
+        result
     }
 
     /// Search using fused sieve+governor computation (fastest path).
@@ -293,15 +431,19 @@ impl SearchWorker {
     fn search_fused(
         &self,
         search_start: u64,
-        end: u64,
         checkpoint: &mut Checkpoint,
         progress: &GlobalProgress,
         checkpoint_path: &PathBuf,
         checkpoint_interval: u64,
         run_logger: &mut RunLogger,
     ) -> Result<()> {
-        let mut current_run = 0usize;
-        let mut run_start = search_start;
+        let end = checkpoint.end;
+        let mut current_run = checkpoint.current_run;
+        let mut run_start = if current_run == 0 {
+            search_start
+        } else {
+            checkpoint.current_run_start
+        };
         let mut checkpoint_counter = 0u64;
         let mut pos = search_start;
 
@@ -311,6 +453,18 @@ impl SearchWorker {
         let mut ring_buf: Vec<bool> = vec![false; window_size];
         let mut ring_idx: usize = 0;
         let mut ring_filled: usize = 0; // how many slots have been written
+
+        // Fused audit scheduling (in terms of `checkpoint.checked`).
+        let audit_interval = self.fused_audit_interval;
+        let mut next_audit_at = if audit_interval > 0 {
+            checkpoint
+                .checked
+                .div_euclid(audit_interval)
+                .saturating_add(1)
+                .saturating_mul(audit_interval)
+        } else {
+            0
+        };
 
         while pos < end {
             if progress.should_stop.load(Ordering::Relaxed) {
@@ -325,6 +479,27 @@ impl SearchWorker {
 
             // Fused sieve+governor: compute exact governor membership for entire batch
             let batch = FusedBatchResult::compute(batch_lo, batch_len, &self.prefilter_primes);
+
+            // Optional audit: cross-check the fused result against the direct governor test.
+            if audit_interval > 0 && next_audit_at > checkpoint.checked {
+                let checked_before = checkpoint.checked;
+                let checked_after = checked_before.saturating_add(batch_len as u64);
+
+                while next_audit_at > checked_before && next_audit_at <= checked_after {
+                    let idx = (next_audit_at - checked_before - 1) as usize;
+                    let n = batch_lo + idx as u64;
+                    let fused = batch.is_governor[idx];
+                    let direct = self.checker.is_governor(n);
+                    if fused != direct {
+                        progress.should_stop.store(true, Ordering::Relaxed);
+                        return Err(crate::Error::Audit(format!(
+                            "Fused audit mismatch (worker {}): n={}, fused={}, direct={}",
+                            self.id, n, fused, direct
+                        )));
+                    }
+                    next_audit_at = next_audit_at.saturating_add(audit_interval);
+                }
+            }
 
             // Track statistics
             progress
@@ -343,6 +518,8 @@ impl SearchWorker {
                 let is_gov = batch.is_governor[i];
 
                 checkpoint.checked += 1;
+                checkpoint.sum_checked += n as u128;
+                checkpoint.xor_checked ^= n;
                 checkpoint.current_pos = n + 1;
                 progress.total_checked.fetch_add(1, Ordering::Relaxed);
 
@@ -362,7 +539,7 @@ impl SearchWorker {
                     }
 
                     if current_run == self.target_run_length {
-                        self.handle_candidate(n, checkpoint);
+                        self.handle_candidate(n, checkpoint)?;
                     }
                 } else {
                     if current_run >= 2 {
@@ -391,7 +568,7 @@ impl SearchWorker {
                             checkpoint.safety_net_windows_checked += 1;
 
                             // Check small primes for this window
-                            if self.verifier.check_small_primes(k, n).is_none() {
+                            if self.verifier.check_small_primes(k, n)?.is_none() {
                                 // Passes small-prime test but NOT a full governor run!
                                 checkpoint.safety_net_alerts += 1;
                                 log::warn!(
@@ -402,14 +579,15 @@ impl SearchWorker {
                                 // Find which positions are non-governors
                                 let mut non_gov_positions = Vec::new();
                                 for offset in 0..window_size {
-                                    let buf_idx = (ring_idx + window_size - 1 - offset) % window_size;
+                                    let buf_idx =
+                                        (ring_idx + window_size - 1 - offset) % window_size;
                                     if !ring_buf[buf_idx] {
                                         non_gov_positions.push(offset as u64);
                                     }
                                 }
 
                                 // Run full verification to confirm
-                                let full_result = self.verifier.verify(k, n);
+                                let full_result = self.verifier.verify(k, n)?;
                                 let full_valid = full_result.is_valid;
                                 let full_failing = full_result.failing_prime;
 
@@ -441,9 +619,11 @@ impl SearchWorker {
 
                 checkpoint_counter += 1;
                 if checkpoint_counter >= checkpoint_interval {
+                    checkpoint.current_run = current_run;
+                    checkpoint.current_run_start = run_start;
+                    run_logger.flush()?;
                     checkpoint.touch();
                     checkpoint.save_atomic_slim(checkpoint_path)?;
-                    run_logger.flush()?;
                     checkpoint_counter = 0;
                 }
             }
@@ -457,9 +637,11 @@ impl SearchWorker {
             }
         }
 
+        checkpoint.current_run = current_run;
+        checkpoint.current_run_start = run_start;
+        run_logger.flush()?;
         checkpoint.touch();
         checkpoint.save_atomic_slim(checkpoint_path)?;
-        run_logger.flush()?;
 
         log::info!(
             "Worker {} completed: checked {}, governors {}, longest run {} at {}",
@@ -477,15 +659,19 @@ impl SearchWorker {
     fn search_linear(
         &self,
         search_start: u64,
-        end: u64,
         checkpoint: &mut Checkpoint,
         progress: &GlobalProgress,
         checkpoint_path: &PathBuf,
         checkpoint_interval: u64,
         run_logger: &mut RunLogger,
     ) -> Result<()> {
-        let mut current_run = 0usize;
-        let mut run_start = search_start;
+        let end = checkpoint.end;
+        let mut current_run = checkpoint.current_run;
+        let mut run_start = if current_run == 0 {
+            search_start
+        } else {
+            checkpoint.current_run_start
+        };
         let mut checkpoint_counter = 0u64;
 
         for n in search_start..end {
@@ -497,6 +683,8 @@ impl SearchWorker {
             let is_gov = self.checker.is_governor(n);
 
             checkpoint.checked += 1;
+            checkpoint.sum_checked += n as u128;
+            checkpoint.xor_checked ^= n;
             checkpoint.current_pos = n + 1;
             progress.total_checked.fetch_add(1, Ordering::Relaxed);
 
@@ -516,7 +704,7 @@ impl SearchWorker {
                 }
 
                 if current_run == self.target_run_length {
-                    self.handle_candidate(n, checkpoint);
+                    self.handle_candidate(n, checkpoint)?;
                 }
             } else {
                 if current_run >= 2 {
@@ -529,9 +717,11 @@ impl SearchWorker {
 
             checkpoint_counter += 1;
             if checkpoint_counter >= checkpoint_interval {
+                checkpoint.current_run = current_run;
+                checkpoint.current_run_start = run_start;
+                run_logger.flush()?;
                 checkpoint.touch();
                 checkpoint.save_atomic_slim(checkpoint_path)?;
-                run_logger.flush()?;
                 checkpoint_counter = 0;
             }
         }
@@ -542,9 +732,11 @@ impl SearchWorker {
             }
         }
 
+        checkpoint.current_run = current_run;
+        checkpoint.current_run_start = run_start;
+        run_logger.flush()?;
         checkpoint.touch();
         checkpoint.save_atomic_slim(checkpoint_path)?;
-        run_logger.flush()?;
 
         log::info!(
             "Worker {} completed: checked {}, governors {}, longest run {} at {}",
@@ -559,7 +751,7 @@ impl SearchWorker {
     }
 
     /// Handle a candidate run of the target length.
-    fn handle_candidate(&self, candidate: u64, checkpoint: &mut Checkpoint) {
+    fn handle_candidate(&self, candidate: u64, checkpoint: &mut Checkpoint) -> Result<()> {
         log::warn!(
             "Worker {} found candidate run of {} at n={}!",
             self.id,
@@ -572,17 +764,13 @@ impl SearchWorker {
         if self.verify_candidates {
             let k = (self.target_run_length - 1) as u32;
             let result = if self.full_verify {
-                self.verifier.verify(k, candidate)
+                self.verifier.verify(k, candidate)?
             } else {
-                self.verifier.verify_fast(k, candidate)
+                self.verifier.verify_fast(k, candidate)?
             };
 
             if result.is_valid {
-                log::error!(
-                    "*** VERIFIED WITNESS FOUND: k={}, n={} ***",
-                    k,
-                    candidate
-                );
+                log::error!("*** VERIFIED WITNESS FOUND: k={}, n={} ***", k, candidate);
                 checkpoint.witnesses.push(candidate);
             } else if let Some(failing_p) = result.failing_prime {
                 let demand = *result.demand.get(&failing_p).unwrap_or(&0);
@@ -610,12 +798,43 @@ impl SearchWorker {
                 checkpoint.false_positives.push(candidate);
             }
         }
+        Ok(())
     }
 }
 
 /// Run a parallel search with the given configuration.
 pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
     let start_time = Instant::now();
+
+    if config.target_k == 0 {
+        return Err(crate::Error::InvalidParameter(
+            "target_k must be >= 1".to_string(),
+        ));
+    }
+    if config.end <= config.start {
+        return Err(crate::Error::InvalidParameter(format!(
+            "end ({}) must be greater than start ({})",
+            config.end, config.start
+        )));
+    }
+    if config.num_workers == 0 {
+        return Err(crate::Error::InvalidParameter(
+            "num_workers must be >= 1".to_string(),
+        ));
+    }
+    if config.checkpoint_interval == 0 {
+        return Err(crate::Error::InvalidParameter(
+            "checkpoint_interval must be >= 1".to_string(),
+        ));
+    }
+    // `GovernorChecker` (Legendre supply) requires that `2n` fits in `u64`.
+    let max_safe_end = u64::MAX / 2 + 1;
+    if config.end > max_safe_end {
+        return Err(crate::Error::InvalidParameter(format!(
+            "end too large: end={} must be <= {} to ensure 2n fits in u64",
+            config.end, max_safe_end
+        )));
+    }
 
     std::fs::create_dir_all(&config.output_dir)?;
 
@@ -630,7 +849,7 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
     );
 
     // Build prefilter sieve (primes up to √(2·end) for the fused computation)
-    let prefilter_limit = ((2.0 * config.end as f64).sqrt()) as u64 + 1000;
+    let prefilter_limit = (isqrt_u128(2u128 * (config.end as u128)) as u64).saturating_add(1000);
     let prefilter_sieve = PrimeSieve::new(prefilter_limit);
     let prefilter_primes = Arc::new(prefilter_sieve.primes().to_vec());
     log::info!(
@@ -661,17 +880,22 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
         config.target_k,
         config.start,
         config.end,
-        if config.no_prefilter { "linear" } else { "fused" }
+        if config.no_prefilter {
+            "linear"
+        } else {
+            "fused"
+        }
     );
 
     let progress = Arc::new(GlobalProgress::new());
 
-    let results: Vec<Checkpoint> = ranges
+    let results: Vec<Result<Checkpoint>> = ranges
         .into_par_iter()
-        .map(|(worker_id, w_start, w_end)| {
-            let checkpoint_path = config
-                .output_dir
-                .join(format!("checkpoint_k{}_w{:02}.json", config.target_k, worker_id));
+        .map(|(worker_id, w_start, w_end)| -> Result<Checkpoint> {
+            let checkpoint_path = config.output_dir.join(format!(
+                "checkpoint_k{}_w{:02}.json",
+                config.target_k, worker_id
+            ));
 
             let run_log_path = config
                 .output_dir
@@ -679,9 +903,91 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
 
             let mut checkpoint = if checkpoint_path.exists() {
                 match Checkpoint::load(&checkpoint_path) {
-                    Ok(cp) => {
-                        log::info!("Worker {} resuming from checkpoint", worker_id);
-                        cp
+                    Ok(mut cp) => {
+                        let mut ok = true;
+                        if cp.target_k != config.target_k || cp.start != w_start || cp.end != w_end {
+                            ok = false;
+                            log::warn!(
+                                "Worker {} checkpoint mismatch: expected k={}, range=[{}, {}), got k={}, range=[{}, {}); starting fresh",
+                                worker_id,
+                                config.target_k,
+                                w_start,
+                                w_end,
+                                cp.target_k,
+                                cp.start,
+                                cp.end
+                            );
+                        }
+                        if cp.current_pos < cp.start || cp.current_pos > cp.end {
+                            ok = false;
+                            log::warn!(
+                                "Worker {} checkpoint current_pos {} out of range [{}, {}); starting fresh",
+                                worker_id,
+                                cp.current_pos,
+                                cp.start,
+                                cp.end
+                            );
+                        }
+                        if cp.checked != cp.current_pos.saturating_sub(cp.start) {
+                            ok = false;
+                            log::warn!(
+                                "Worker {} checkpoint checked {} inconsistent with current_pos/start ({} - {}); starting fresh",
+                                worker_id,
+                                cp.checked,
+                                cp.current_pos,
+                                cp.start
+                            );
+                        }
+                        if cp.current_run > 0
+                            && (cp.current_run_start < cp.start || cp.current_run_start >= cp.current_pos)
+                        {
+                            ok = false;
+                            log::warn!(
+                                "Worker {} checkpoint run state inconsistent (current_run={}, current_run_start={}, current_pos={}); starting fresh",
+                                worker_id,
+                                cp.current_run,
+                                cp.current_run_start,
+                                cp.current_pos
+                            );
+                        }
+
+                        if ok {
+                            let expected_sum = sum_range_u128(cp.start, cp.current_pos);
+                            let expected_xor = xor_range(cp.start, cp.current_pos);
+                            if cp.checked > 0
+                                && cp.sum_checked == 0
+                                && cp.xor_checked == 0
+                                && (expected_sum != 0 || expected_xor != 0)
+                            {
+                                log::info!(
+                                    "Worker {} initializing coverage invariants for legacy checkpoint",
+                                    worker_id
+                                );
+                                cp.sum_checked = expected_sum;
+                                cp.xor_checked = expected_xor;
+                            } else if cp.sum_checked != expected_sum || cp.xor_checked != expected_xor {
+                                ok = false;
+                                log::warn!(
+                                    "Worker {} checkpoint coverage invariants inconsistent; starting fresh",
+                                    worker_id
+                                );
+                            }
+                        }
+
+                        if ok {
+                            if cp.worker_id != Some(worker_id) {
+                                log::warn!(
+                                    "Worker {} checkpoint has worker_id={:?}; continuing with corrected value",
+                                    worker_id,
+                                    cp.worker_id
+                                );
+                                cp.worker_id = Some(worker_id);
+                            }
+                            log::info!("Worker {} resuming from checkpoint", worker_id);
+                            cp
+                        } else {
+                            Checkpoint::new_worker(config.target_k, w_start, w_end, worker_id)
+                        }
                     }
                     Err(e) => {
                         log::warn!("Failed to load checkpoint: {}, starting fresh", e);
@@ -693,13 +999,7 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
             };
 
             // Create run logger (append-only JSONL)
-            let mut run_logger = match RunLogger::new(&run_log_path) {
-                Ok(rl) => rl,
-                Err(e) => {
-                    log::error!("Worker {} failed to create run logger: {}", worker_id, e);
-                    return checkpoint;
-                }
-            };
+            let mut run_logger = RunLogger::new(&run_log_path)?;
 
             // v2 → v3 migration: if checkpoint has existing significant_runs,
             // migrate them to the run log file
@@ -707,18 +1007,17 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                 let count = checkpoint.significant_runs.len();
                 log::info!(
                     "Worker {} migrating {} significant runs from v2 checkpoint to run log",
-                    worker_id, count
+                    worker_id,
+                    count
                 );
-                match run_logger.migrate_from_v2(&checkpoint.significant_runs) {
-                    Ok(n) => {
-                        log::info!("Worker {} migrated {} runs to {}", worker_id, n, run_log_path.display());
-                        checkpoint.significant_runs.clear();
-                    }
-                    Err(e) => {
-                        log::error!("Worker {} failed to migrate runs: {}", worker_id, e);
-                        return checkpoint;
-                    }
-                }
+                let migrated = run_logger.migrate_from_v2(&checkpoint.significant_runs)?;
+                log::info!(
+                    "Worker {} migrated {} runs to {}",
+                    worker_id,
+                    migrated,
+                    run_log_path.display()
+                );
+                checkpoint.significant_runs.clear();
             }
 
             let worker = SearchWorker::new(
@@ -730,23 +1029,23 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                 config.full_verify,
                 config.safety_net,
                 prefilter_primes.clone(),
+                config.fused_self_check_samples,
+                config.fused_audit_interval,
             );
 
-            if let Err(e) = worker.search_range(
-                w_start,
-                w_end,
+            worker.search_range(
                 &mut checkpoint,
                 &progress,
                 &checkpoint_path,
                 config.checkpoint_interval,
                 &mut run_logger,
-            ) {
-                log::error!("Worker {} error: {}", worker_id, e);
-            }
+            )?;
 
-            checkpoint
+            Ok(checkpoint)
         })
         .collect();
+
+    let results: Vec<Checkpoint> = results.into_iter().collect::<Result<Vec<_>>>()?;
 
     let duration = start_time.elapsed();
 
@@ -789,8 +1088,25 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
     }
 
     candidates.sort();
+    candidates.dedup();
     witnesses.sort();
+    witnesses.dedup();
+    false_positives.sort();
+    false_positives.dedup();
+    false_positive_details.sort_by_key(|fp| (fp.position, fp.run_length, fp.failing_prime));
+    false_positive_details.dedup_by_key(|fp| {
+        (
+            fp.position,
+            fp.run_length,
+            fp.failing_prime,
+            fp.demand,
+            fp.supply,
+        )
+    });
     significant_runs.sort_by_key(|r| r.start);
+    significant_runs.dedup_by_key(|r| r.start);
+    counter_examples.sort_by_key(|ce| ce.n);
+    counter_examples.dedup_by_key(|ce| ce.n);
 
     let rate = total_checked as f64 / duration.as_secs_f64();
 
@@ -816,6 +1132,7 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
         prefilter_rejected_odd_prime: progress.total_rejected_odd_prime.load(Ordering::Relaxed),
         prefilter_rejected_large_pf: progress.total_rejected_large_pf.load(Ordering::Relaxed),
         prefilter_rejected_vp_fail: progress.total_rejected_vp_fail.load(Ordering::Relaxed),
+        worker_checkpoints: results,
     })
 }
 
@@ -857,8 +1174,7 @@ pub fn print_results(result: &SearchResult, config: &SearchConfig) {
 
     // Fused sieve statistics
     if result.prefilter_rejected > 0 {
-        let rejection_rate =
-            result.prefilter_rejected as f64 / result.total_checked as f64 * 100.0;
+        let rejection_rate = result.prefilter_rejected as f64 / result.total_checked as f64 * 100.0;
         println!("*** FUSED SIEVE STATISTICS ***");
         println!(
             "  Not governor: {:>15} ({:.1}%)",
@@ -941,15 +1257,9 @@ pub fn print_results(result: &SearchResult, config: &SearchConfig) {
 
     if result.safety_net_windows_checked > 0 || !result.counter_examples.is_empty() {
         println!("\n*** SAFETY-NET RESULTS ***");
-        println!(
-            "  Windows checked: {}",
-            result.safety_net_windows_checked
-        );
+        println!("  Windows checked: {}", result.safety_net_windows_checked);
         println!("  Alerts: {}", result.safety_net_alerts);
-        println!(
-            "  Counter-examples: {}",
-            result.counter_examples.len()
-        );
+        println!("  Counter-examples: {}", result.counter_examples.len());
 
         for ce in &result.counter_examples {
             let status = match ce.full_verify_result {
@@ -962,10 +1272,7 @@ pub fn print_results(result: &SearchResult, config: &SearchConfig) {
             };
             println!(
                 "  n={}: {} non-governors at offsets {:?} [{}]",
-                ce.n,
-                ce.non_governor_count,
-                ce.non_governor_positions,
-                status
+                ce.n, ce.non_governor_count, ce.non_governor_positions, status
             );
         }
     }
@@ -1008,6 +1315,8 @@ mod tests {
             no_prefilter: false,
             full_verify: false,
             safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -1041,6 +1350,8 @@ mod tests {
             no_prefilter: true,
             full_verify: false,
             safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -1068,6 +1379,8 @@ mod tests {
             no_prefilter: false,
             full_verify: false,
             safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
         };
 
         let config_linear = SearchConfig {
@@ -1111,6 +1424,8 @@ mod tests {
             no_prefilter: false,
             full_verify: false,
             safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
         };
 
         let config_full = SearchConfig {
@@ -1148,6 +1463,8 @@ mod tests {
             no_prefilter: false,
             full_verify: false,
             safety_net: true,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -1164,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v3_checkpoint_is_slim() {
+    fn test_v4_checkpoint_is_slim() {
         let dir = tempdir().unwrap();
 
         let config = SearchConfig {
@@ -1179,6 +1496,8 @@ mod tests {
             no_prefilter: false,
             full_verify: false,
             safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
         };
 
         let _result = parallel_search(&config).unwrap();
@@ -1188,20 +1507,85 @@ mod tests {
         let cp = Checkpoint::load(&cp_path).unwrap();
         assert!(
             cp.significant_runs.is_empty(),
-            "v3 checkpoint should have empty significant_runs"
+            "v4 checkpoint should have empty significant_runs"
         );
-        assert_eq!(cp.version, 3, "Checkpoint should be version 3");
+        assert_eq!(cp.version, 4, "Checkpoint should be version 4");
+
+        // Coverage invariants should match the assigned worker range.
+        assert_eq!(cp.checked, config.end - config.start);
+        assert_eq!(cp.sum_checked, sum_range_u128(config.start, config.end));
+        assert_eq!(cp.xor_checked, xor_range(config.start, config.end));
 
         // Verify checkpoint file is small (under 2KB)
         let file_size = std::fs::metadata(&cp_path).unwrap().len();
         assert!(
             file_size < 2048,
-            "v3 checkpoint should be under 2KB, got {} bytes",
+            "v4 checkpoint should be under 2KB, got {} bytes",
             file_size
         );
 
         // Verify run log exists and has content
         let run_log_path = dir.path().join("runs_k2_w00.jsonl");
         assert!(run_log_path.exists(), "Run log should exist");
+    }
+
+    #[test]
+    fn test_resume_does_not_miss_run_crossing_checkpoint_boundary() {
+        // Regression test: if we resume from the *middle* of a governor run,
+        // we must not miss candidates that depend on prior run state.
+        //
+        // Minimal example: k=1 looks for a run of 2 governors. Since 1 and 2
+        // are both governors, resuming at n=2 with `current_run=1` must still
+        // detect the candidate at n=2.
+        let dir = tempdir().unwrap();
+
+        let end = 5u64;
+        let sieve = PrimeSieve::for_range(end);
+        let prefilter = PrimeSieve::new(100);
+        let prefilter_primes = Arc::new(prefilter.primes().to_vec());
+
+        let worker = SearchWorker::new(
+            0,
+            sieve,
+            1,     // k
+            true,  // verify candidates
+            false, // use fused (irrelevant here, we call search_linear directly)
+            true,  // full verify for determinism
+            false,
+            prefilter_primes,
+            0,
+            0,
+        );
+
+        let progress = GlobalProgress::new();
+        let checkpoint_path = dir.path().join("checkpoint_k1_w00.json");
+        let run_log_path = dir.path().join("runs_k1_w00.jsonl");
+        let mut run_logger = RunLogger::new(&run_log_path).unwrap();
+
+        // Simulate a saved checkpoint after processing n=1 (a governor).
+        let mut checkpoint = Checkpoint::new_worker(1, 1, end, 0);
+        checkpoint.current_pos = 2;
+        checkpoint.current_run = 1;
+        checkpoint.current_run_start = 1;
+        checkpoint.checked = 1;
+        checkpoint.sum_checked = sum_range_u128(checkpoint.start, checkpoint.current_pos);
+        checkpoint.xor_checked = xor_range(checkpoint.start, checkpoint.current_pos);
+        checkpoint.governor_count = 1;
+
+        worker
+            .search_linear(
+                checkpoint.current_pos,
+                &mut checkpoint,
+                &progress,
+                &checkpoint_path,
+                10,
+                &mut run_logger,
+            )
+            .unwrap();
+
+        assert!(
+            checkpoint.witnesses.contains(&2),
+            "Resumed search should still find k=1 witness at n=2"
+        );
     }
 }
