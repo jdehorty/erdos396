@@ -6,10 +6,7 @@
 //!     sum of v_p(n-i) for i=0..k ≤ v_p(C(2n, n))
 
 use crate::factor::Factorization;
-use crate::governor::{
-    vp_central_binom_kummer_fast, vp_central_binom_p2, vp_central_binom_p3, vp_central_binom_p5,
-    vp_factorial, GovernorChecker,
-};
+use crate::governor::{vp_central_binom_dispatch, vp_factorial, GovernorChecker};
 use crate::sieve::PrimeSieve;
 use crate::{Error, Result};
 use std::collections::HashMap;
@@ -256,12 +253,7 @@ impl WitnessVerifier {
 /// Compute v_p(C(2n, n)) using the best available method for prime p.
 #[inline]
 fn vp_supply(n: u64, p: u64) -> u64 {
-    match p {
-        2 => vp_central_binom_p2(n),
-        3 => vp_central_binom_p3(n),
-        5 => vp_central_binom_p5(n),
-        _ => vp_central_binom_kummer_fast(n, p),
-    }
+    vp_central_binom_dispatch(n, p)
 }
 
 #[inline]

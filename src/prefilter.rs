@@ -14,9 +14,7 @@
 //!    of each prime (amortized), while trial division tests every prime
 //!    against every number.
 
-use crate::governor::{
-    vp_central_binom_kummer_fast, vp_central_binom_p2, vp_central_binom_p3, vp_central_binom_p5,
-};
+use crate::governor::vp_central_binom_dispatch;
 use crate::int_math::isqrt_u128;
 
 /// Fused batch result: exact governor membership computed in a single sieve pass.
@@ -120,21 +118,9 @@ impl FusedBatchResult {
                         remaining[idx] /= p;
                     }
 
-                    // Check v_p(C(2n,n)) ≥ v_p(n) inline
-                    // Use Kummer's theorem: single loop counting carries
-                    // when adding n+n in base p (~2x fewer iterations than
-                    // Legendre). p=2 uses hardware POPCNT; p=3,5 use
-                    // specialized functions with compile-time constant divisor.
+                    // Check v_p(C(2n,n)) ≥ v_p(n) inline (const-generic dispatch)
                     let n = lo + idx as u64;
-                    let supply = if p == 2 {
-                        vp_central_binom_p2(n)
-                    } else if p == 3 {
-                        vp_central_binom_p3(n)
-                    } else if p == 5 {
-                        vp_central_binom_p5(n)
-                    } else {
-                        vp_central_binom_kummer_fast(n, p)
-                    };
+                    let supply = vp_central_binom_dispatch(n, p);
                     if (exp as u64) > supply {
                         is_governor[idx] = false;
                         rejected_vp_fail += 1;

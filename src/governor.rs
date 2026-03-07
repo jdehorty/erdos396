@@ -94,16 +94,8 @@ impl GovernorChecker {
                 }
 
                 // Check supply immediately — early exit on failure
-                // Use Kummer's theorem for all primes
-                let supply = if p == 2 {
-                    vp_central_binom_p2(n)
-                } else if p == 3 {
-                    vp_central_binom_p3(n)
-                } else if p == 5 {
-                    vp_central_binom_p5(n)
-                } else {
-                    vp_central_binom_kummer_fast(n, p)
-                };
+                // Use Kummer's theorem for all primes (const-generic dispatch)
+                let supply = vp_central_binom_dispatch(n, p);
                 if (exp as u64) > supply {
                     return false;
                 }
@@ -259,6 +251,32 @@ pub fn vp_central_binom_p5(n: u64) -> u64 {
     carries
 }
 
+/// Fast v_p(C(2n, n)) using Kummer's theorem with a compile-time constant prime.
+///
+/// Identical logic to `vp_central_binom_kummer_fast`, but with P as a const
+/// generic. The Rust compiler replaces `n % P` and `n / P` with multiply+shift
+/// sequences (~4 cycles each vs ~30-40 cycles for runtime u64 division).
+///
+/// Use the `vp_supply_const_dispatch!` macro or a match statement to call the
+/// appropriate monomorphization for each barrier prime.
+#[inline(always)]
+pub fn vp_central_binom_kummer_const<const P: u64>(n: u64) -> u64 {
+    debug_assert!(P >= 2, "P must be at least 2");
+    let mut carries = 0u64;
+    let mut n_remaining = n;
+    let mut carry = 0u64;
+    let half = P / 2;
+    let half_up = half + (P & 1); // ceil(P/2)
+    while n_remaining > 0 {
+        let digit = n_remaining % P;
+        let threshold = if carry == 0 { half_up } else { half };
+        carry = (digit >= threshold) as u64;
+        carries += carry;
+        n_remaining /= P;
+    }
+    carries
+}
+
 /// Fast v_p(C(2n, n)) using Kummer's theorem for any prime p.
 ///
 /// Single loop counting carries when adding n+n in base p.
@@ -286,6 +304,32 @@ pub fn vp_central_binom_kummer_fast(n: u64, p: u64) -> u64 {
         n_remaining /= p;
     }
     carries
+}
+
+/// Dispatch v_p(C(2n,n)) to the best available method for each prime.
+///
+/// Uses popcount for p=2, const-generic Kummer for primes 3..47 (compile-time
+/// constant division), and falls back to runtime Kummer for all other primes.
+#[inline(always)]
+pub fn vp_central_binom_dispatch(n: u64, p: u64) -> u64 {
+    match p {
+        2 => vp_central_binom_p2(n),
+        3 => vp_central_binom_kummer_const::<3>(n),
+        5 => vp_central_binom_kummer_const::<5>(n),
+        7 => vp_central_binom_kummer_const::<7>(n),
+        11 => vp_central_binom_kummer_const::<11>(n),
+        13 => vp_central_binom_kummer_const::<13>(n),
+        17 => vp_central_binom_kummer_const::<17>(n),
+        19 => vp_central_binom_kummer_const::<19>(n),
+        23 => vp_central_binom_kummer_const::<23>(n),
+        29 => vp_central_binom_kummer_const::<29>(n),
+        31 => vp_central_binom_kummer_const::<31>(n),
+        37 => vp_central_binom_kummer_const::<37>(n),
+        41 => vp_central_binom_kummer_const::<41>(n),
+        43 => vp_central_binom_kummer_const::<43>(n),
+        47 => vp_central_binom_kummer_const::<47>(n),
+        _ => vp_central_binom_kummer_fast(n, p),
+    }
 }
 
 /// Alternative computation using Kummer's theorem.
@@ -483,6 +527,98 @@ mod tests {
     }
 
     #[test]
+    fn test_kummer_const_matches_legendre_all_barrier_primes() {
+        // Verify the const-generic Kummer function matches Legendre for all primes up to 47
+        type KummerFn = fn(u64) -> u64;
+        let primes_and_fns: Vec<(u64, KummerFn)> = vec![
+            (3, vp_central_binom_kummer_const::<3>),
+            (5, vp_central_binom_kummer_const::<5>),
+            (7, vp_central_binom_kummer_const::<7>),
+            (11, vp_central_binom_kummer_const::<11>),
+            (13, vp_central_binom_kummer_const::<13>),
+            (17, vp_central_binom_kummer_const::<17>),
+            (19, vp_central_binom_kummer_const::<19>),
+            (23, vp_central_binom_kummer_const::<23>),
+            (29, vp_central_binom_kummer_const::<29>),
+            (31, vp_central_binom_kummer_const::<31>),
+            (37, vp_central_binom_kummer_const::<37>),
+            (41, vp_central_binom_kummer_const::<41>),
+            (43, vp_central_binom_kummer_const::<43>),
+            (47, vp_central_binom_kummer_const::<47>),
+        ];
+        for (p, f) in &primes_and_fns {
+            for n in 1..=10_000u64 {
+                let legendre = vp_central_binom(n, *p);
+                let kummer_const = f(n);
+                assert_eq!(
+                    legendre, kummer_const,
+                    "const<{}> mismatch at n={}: Legendre={}, Kummer_const={}",
+                    p, n, legendre, kummer_const
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_kummer_const_large_numbers() {
+        for &n in &[
+            10_000_000_000u64,
+            339_949_252,
+            17_609_764_993,
+            u64::MAX / 2 - 1,
+        ] {
+            // Verify const-generic matches Legendre for all barrier primes
+            assert_eq!(
+                vp_central_binom(n, 7),
+                vp_central_binom_kummer_const::<7>(n),
+                "p=7 at n={}",
+                n
+            );
+            assert_eq!(
+                vp_central_binom(n, 11),
+                vp_central_binom_kummer_const::<11>(n),
+                "p=11 at n={}",
+                n
+            );
+            assert_eq!(
+                vp_central_binom(n, 13),
+                vp_central_binom_kummer_const::<13>(n),
+                "p=13 at n={}",
+                n
+            );
+            assert_eq!(
+                vp_central_binom(n, 23),
+                vp_central_binom_kummer_const::<23>(n),
+                "p=23 at n={}",
+                n
+            );
+            assert_eq!(
+                vp_central_binom(n, 47),
+                vp_central_binom_kummer_const::<47>(n),
+                "p=47 at n={}",
+                n
+            );
+        }
+    }
+
+    #[test]
+    fn test_dispatch_matches_legendre() {
+        // Verify vp_central_binom_dispatch matches Legendre for all primes up to 47
+        let primes = [2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47];
+        for &p in &primes {
+            for n in 1..=10_000u64 {
+                let legendre = vp_central_binom(n, p);
+                let dispatch = vp_central_binom_dispatch(n, p);
+                assert_eq!(
+                    legendre, dispatch,
+                    "dispatch mismatch at p={}, n={}: Legendre={}, dispatch={}",
+                    p, n, legendre, dispatch
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_kummer_fast_matches_legendre_random_large() {
         // Random sampling at the 10^13 scale (k=13 search range).
         let primes = [2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 97, 997];
@@ -494,12 +630,7 @@ mod tests {
             let p = primes[(lcg_next(&mut state) as usize) % primes.len()];
 
             let legendre = vp_central_binom(n, p);
-            let kummer = match p {
-                2 => vp_central_binom_p2(n),
-                3 => vp_central_binom_p3(n),
-                5 => vp_central_binom_p5(n),
-                _ => vp_central_binom_kummer_fast(n, p),
-            };
+            let kummer = vp_central_binom_dispatch(n, p);
 
             assert_eq!(
                 legendre, kummer,

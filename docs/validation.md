@@ -65,19 +65,27 @@ cargo run --release --bin audit_runs -- -k 13 -d checkpoints \
 ### Phase 2: Non-Governor Witness Search (Completeness Check)
 
 The `validate` binary implements this phase. For each integer n in a range, it
-checks the witness condition at the **barrier primes** p < 2k+1 using a sliding
-window over the block {n-k, ..., n}.
+checks the witness condition with a two-stage sieve over the block {n-k, ..., n}:
+
+1. **Large-prime governor-failure sieve (fast rejection).**  
+   A fused segmented pass strips factors of all primes `p ≤ √(2n_max)` from
+   each block term and marks terms that fail the governor condition at any
+   **large** prime `p ≥ 2k+1`. Small-prime factors (`p < 2k+1`) are stripped
+   without supply checks, and powers of 2 are removed with a `trailing_zeros`
+   fast path.
+
+2. **Barrier-prime witness screen (exact).**  
+   Only if every block term avoids large-prime failure, `validate` checks the
+   witness inequality at all barrier primes `p < 2k+1`, then runs full all-prime
+   verification on screen passes.
 
 Mathematically, this screen has **zero false negatives**: any k-witness satisfies
 the witness condition at *every* prime, hence in particular at all barrier primes.
 The Small Prime Barrier Theorem (Corollary 6) explains why restricting the *screen*
 to primes `p < 2k+1` is the right place to look for any “non-governor” behavior.
 
-The sliding window maintains per-prime demand sums incrementally. As n advances
-by 1, one term leaves and one enters the window. For k=13 with 9 barrier primes,
-this costs ~60 arithmetic operations per integer — comparable to the governor sieve.
-
-Candidates passing the screen undergo full all-prime verification.
+In practice, stage (1) rejects almost all values. Stage (2) is therefore very
+rare and can use straightforward exact arithmetic while preserving throughput.
 
 **How the `validate` binary works:**
 
