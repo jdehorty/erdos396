@@ -1,0 +1,11 @@
+host=server-b
+commit=f0dfb4169c5fb726f29753612ca9bd0fea98abad
+binary=/root/witness-search-erdos396/target/server/validate
+sha256=e2563bef0ea904f15d95a622d5fcb4b00ce0254c5ce809ba87e7b230c5fc19b1
+rustc=rustc 1.87.0 (17067e9ac 2025-05-09)
+workers=50
+start=9684496742351
+end=18253129921842
+self_check_samples=100
+audit_interval=100000000
+command=./target/server/validate -k 13 --start 9684496742351 --end 18253129921842 --workers 50 --self-check-samples 100 --audit-interval 100000000 --output-dir /root/validate_runs/b_k13_9684496742351_18253129921842 --report-interval 300

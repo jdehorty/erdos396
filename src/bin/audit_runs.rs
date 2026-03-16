@@ -10,6 +10,7 @@
 
 use anyhow::Context;
 use clap::Parser;
+use erdos396::false_positive::verify_window;
 use erdos396::verify::WitnessVerifier;
 use erdos396::BuildInfo;
 use rayon::prelude::*;
@@ -357,22 +358,21 @@ fn main() -> anyhow::Result<()> {
                     .par_iter()
                     .map(|c| -> anyhow::Result<RunOutcome> {
                         let length = c.length;
-                        let k = (length - 1) as u32;
                         let n = c.start + length as u64 - 1;
-                        let r = verifier.verify(k, n)?;
+                        let audit = verify_window(&verifier, length, n)?;
                         let mut out = RunOutcome {
                             start: c.start,
                             length,
-                            k,
+                            k: (length - 1) as u32,
                             n,
-                            is_witness: r.is_valid,
-                            failing_prime: r.failing_prime,
-                            demand: None,
-                            supply: None,
+                            is_witness: audit.is_witness,
+                            failing_prime: audit.failing_prime,
+                            demand: audit.demand,
+                            supply: audit.supply,
                         };
-                        if let Some(p) = r.failing_prime {
-                            out.demand = Some(*r.demand.get(&p).unwrap_or(&0));
-                            out.supply = Some(*r.supply.get(&p).unwrap_or(&0));
+                        if out.is_witness {
+                            out.demand = None;
+                            out.supply = None;
                         }
                         Ok(out)
                     })
@@ -429,22 +429,21 @@ fn main() -> anyhow::Result<()> {
             .par_iter()
             .map(|c| -> anyhow::Result<RunOutcome> {
                 let length = c.length;
-                let k = (length - 1) as u32;
                 let n = c.start + length as u64 - 1;
-                let r = verifier.verify(k, n)?;
+                let audit = verify_window(&verifier, length, n)?;
                 let mut out = RunOutcome {
                     start: c.start,
                     length,
-                    k,
+                    k: (length - 1) as u32,
                     n,
-                    is_witness: r.is_valid,
-                    failing_prime: r.failing_prime,
-                    demand: None,
-                    supply: None,
+                    is_witness: audit.is_witness,
+                    failing_prime: audit.failing_prime,
+                    demand: audit.demand,
+                    supply: audit.supply,
                 };
-                if let Some(p) = r.failing_prime {
-                    out.demand = Some(*r.demand.get(&p).unwrap_or(&0));
-                    out.supply = Some(*r.supply.get(&p).unwrap_or(&0));
+                if out.is_witness {
+                    out.demand = None;
+                    out.supply = None;
                 }
                 Ok(out)
             })

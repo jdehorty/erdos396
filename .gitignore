@@ -16,6 +16,13 @@ validate_report_*.json
 audit_report_*.json
 runs_*.jsonl
 
+# Curated validation certificates are tracked (override the runtime ignores above)
+!certificates/validate/validate_report_*.json
+
+# Generated analysis artifacts not intended for the public repo
+/artifacts/
+/data/run_corpus/
+
 # Python
 __pycache__/
 *.pyc

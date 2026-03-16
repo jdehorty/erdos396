@@ -92,6 +92,11 @@ pub struct SearchConfig {
     /// Output directory for checkpoints
     pub output_dir: PathBuf,
 
+    /// Minimum run length to record in the append-only JSONL run logs.
+    ///
+    /// Target-length candidates are still verified regardless of this threshold.
+    pub significant_run_threshold: usize,
+
     /// Whether to verify candidates immediately
     pub verify_candidates: bool,
 
@@ -129,6 +134,7 @@ impl Default for SearchConfig {
             num_workers: num_cpus::get(),
             checkpoint_interval: 1_000_000,
             output_dir: PathBuf::from("checkpoints"),
+            significant_run_threshold: 6,
             verify_candidates: true,
             report_interval: Duration::from_secs(60),
             no_prefilter: false,
@@ -983,19 +989,37 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                                 );
                                 cp.worker_id = Some(worker_id);
                             }
+                            if cp.significant_run_threshold != config.significant_run_threshold {
+                                log::info!(
+                                    "Worker {} updating significant_run_threshold from {} to {}",
+                                    worker_id,
+                                    cp.significant_run_threshold,
+                                    config.significant_run_threshold
+                                );
+                                cp.significant_run_threshold = config.significant_run_threshold;
+                            }
                             log::info!("Worker {} resuming from checkpoint", worker_id);
                             cp
                         } else {
-                            Checkpoint::new_worker(config.target_k, w_start, w_end, worker_id)
+                            let mut cp =
+                                Checkpoint::new_worker(config.target_k, w_start, w_end, worker_id);
+                            cp.significant_run_threshold = config.significant_run_threshold;
+                            cp
                         }
                     }
                     Err(e) => {
                         log::warn!("Failed to load checkpoint: {}, starting fresh", e);
-                        Checkpoint::new_worker(config.target_k, w_start, w_end, worker_id)
+                        let mut cp =
+                            Checkpoint::new_worker(config.target_k, w_start, w_end, worker_id);
+                        cp.significant_run_threshold = config.significant_run_threshold;
+                        cp
                     }
                 }
             } else {
-                Checkpoint::new_worker(config.target_k, w_start, w_end, worker_id)
+                let mut cp =
+                    Checkpoint::new_worker(config.target_k, w_start, w_end, worker_id);
+                cp.significant_run_threshold = config.significant_run_threshold;
+                cp
             };
 
             // Create run logger (append-only JSONL)

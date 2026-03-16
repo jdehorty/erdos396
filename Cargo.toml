@@ -29,6 +29,22 @@ path = "src/bin/validate.rs"
 name = "audit_runs"
 path = "src/bin/audit_runs.rs"
 
+[[bin]]
+name = "build_run_corpus"
+path = "src/bin/build_run_corpus.rs"
+
+[[bin]]
+name = "classify_run_windows"
+path = "src/bin/classify_run_windows.rs"
+
+[[bin]]
+name = "query_run_windows"
+path = "src/bin/query_run_windows.rs"
+
+[[bin]]
+name = "analyze_false_positives"
+path = "src/bin/analyze_false_positives.rs"
+
 [dependencies]
 # Parallelism
 rayon = "1.10"
@@ -43,6 +59,11 @@ clap = { version = "4.4", features = ["derive"] }
 # Serialization for checkpoints
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# Columnar storage
+arrow = "54.2"
+parquet = { version = "54.2", features = ["arrow"] }
+walkdir = "2.5"
 
 # Logging
 log = "0.4"

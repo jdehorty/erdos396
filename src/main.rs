@@ -56,6 +56,15 @@ struct Cli {
     #[arg(short = 'o', long, default_value = "checkpoints")]
     output_dir: PathBuf,
 
+    /// Minimum run length to record in the JSONL run logs.
+    ///
+    /// This is independent of candidate verification: target-length candidates
+    /// are still checked and written into checkpoints even if this threshold is
+    /// larger than k+1. Lower this for small-k exploratory runs when you want
+    /// complete short-run logs.
+    #[arg(long, default_value = "6")]
+    significant_run_threshold: usize,
+
     /// Checkpoint interval (numbers checked between saves)
     #[arg(long, default_value = "1000000")]
     checkpoint_interval: u64,
@@ -361,6 +370,7 @@ fn main() -> anyhow::Result<()> {
         num_workers: cli.workers.unwrap_or_else(num_cpus::get),
         checkpoint_interval: cli.checkpoint_interval,
         output_dir: cli.output_dir,
+        significant_run_threshold: cli.significant_run_threshold,
         verify_candidates: !cli.no_verify,
         report_interval: Duration::from_secs(cli.report_interval),
         no_prefilter: cli.no_prefilter,
@@ -409,6 +419,10 @@ fn main() -> anyhow::Result<()> {
         } else {
             "fast (small primes only)"
         }
+    );
+    println!(
+        "  Significant run threshold: {}",
+        config.significant_run_threshold
     );
     println!(
         "  Safety-net: {}",

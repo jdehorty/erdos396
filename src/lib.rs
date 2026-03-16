@@ -18,9 +18,11 @@
 pub mod build_info;
 pub mod checkpoint;
 pub mod factor;
+pub mod false_positive;
 pub mod governor;
 pub mod int_math;
 pub mod prefilter;
+pub mod run_collection;
 pub mod search;
 pub mod sieve;
 pub mod verify;
@@ -29,7 +31,14 @@ pub mod verify;
 pub use build_info::BuildInfo;
 pub use checkpoint::{Checkpoint, CheckpointManager, CounterExampleInfo, RunLogger};
 pub use factor::Factorization;
+pub use false_positive::{
+    classify_run_windows, ClassificationConfig, ClassificationStats, RunWindowClassification,
+    VerificationAudit,
+};
 pub use governor::GovernorChecker;
+pub use run_collection::{
+    build_run_corpus, BuildRunCorpusConfig, BuildRunCorpusStats, RunRecord, RunWindowRecord,
+};
 pub use search::{SearchConfig, SearchResult, SearchWorker};
 pub use sieve::PrimeSieve;
 pub use verify::WitnessVerifier;
@@ -45,7 +54,7 @@ pub const KNOWN_WITNESSES: &[(u32, u64)] = &[
     (6, 7_979_090),
     (7, 101_130_029),
     (8, 339_949_252),
-    (9, 17_609_764_993),      // Found 2025-01-20! (run of 11 governors)
+    (9, 1_019_547_844),       // Corrected 2026-03-16 by full validate pass
     (10, 17_609_764_994),     // Found 2025-01-20! (same run of 11!)
     (11, 1_070_858_041_585),  // Found 2026-02-09 (run of 12)
     (12, 5_048_891_644_646),  // Found 2026-02-11 (run of 13)
@@ -69,7 +78,7 @@ pub const KNOWN_RUNS_OF_9: &[u64] = &[
 
 /// Known runs of 10+ consecutive Governor Set members (k=9 witness candidates)
 pub const KNOWN_RUNS_OF_10_PLUS: &[(u64, u32)] = &[
-    (17_609_764_993, 11), // run of 11! [17_609_764_984 .. 17_609_764_994] - SMALLEST k=9 witness!
+    (17_609_764_993, 11), // run of 11! [17_609_764_984 .. 17_609_764_994] - valid k=9 witness, but not minimal
     (17_842_967_551, 10), // run of 10 - FALSE POSITIVE (p=3 fails)
     (19_295_451_546, 10), // run of 10 - valid k=9 witness
     (29_661_303_231, 10), // run of 10 - valid k=9 witness

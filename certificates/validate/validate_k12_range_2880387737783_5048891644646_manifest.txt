@@ -1,0 +1,5 @@
+hostname: server-b
+started_utc: 2026-03-11T21:48:01Z
+git_commit: f0dfb4169c5fb726f29753612ca9bd0fea98abad
+binary_sha256: e2563bef0ea904f15d95a622d5fcb4b00ce0254c5ce809ba87e7b230c5fc19b1
+cmd: /root/witness-search-erdos396/target/server/validate -k 12 --start 2880387737783 --end 5048891644646 --workers 50 --self-check-samples 100 --audit-interval 100000000 --report-interval 300 --output-dir /root/validate_runs/b_k12_2880387737783_5048891644646

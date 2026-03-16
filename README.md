@@ -4,25 +4,39 @@ Paper companion repository for *Witness Search for Erdős Problem #396*.
 
 > For each *k*, find the smallest *n* such that *n*(*n*−1)(*n*−2)⋯(*n*−*k*) divides C(2*n*, *n*).
 
-This project discovered the smallest witnesses for k = 8 through k = 13 via exhaustive search of up to 25 trillion integers, extending OEIS [A375077](https://oeis.org/A375077).
+This project computationally established the smallest witnesses for k = 8 through k = 13 via exhaustive search and complete validation of up to 25 trillion integers, extending OEIS [A375077](https://oeis.org/A375077).
 
 ## Results
 
-| k  | Smallest witness *n*  | Search range | Status            |
-|----|----------------------|--------------|-------------------|
-| 1  | 2                    | —            | Known (OEIS)      |
-| 2  | 2,480                | —            | Known (OEIS)      |
-| 3  | 8,178                | —            | Known (OEIS)      |
-| 4  | 45,153               | —            | Known (OEIS)      |
-| 5  | 3,648,841            | —            | Known (OEIS)      |
-| 6  | 7,979,090            | —            | Known (OEIS)      |
-| 7  | 101,130,029          | —            | Known (OEIS)      |
-| 8  | 339,949,252          | 0–370M       | Found 2025-01-17  |
-| 9  | 17,609,764,993       | 0–19.3B      | Found 2025-01-20  |
-| 10 | 17,609,764,994       | 0–19.3B      | Found 2025-01-20  |
-| 11 | 1,070,858,041,585    | 0–2T         | Found 2026-02-09  |
-| 12 | 5,048,891,644,646    | 0–6.15T      | Found 2026-02-11  |
-| 13 | 18,253,129,921,842   | 0–25T        | Found 2026-02-16  |
+| k  | Smallest witness *n*  | Search range | Search status     | Minimality certificate |
+|----|----------------------|--------------|-------------------|------------------------|
+| 1  | 2                    | —            | Known (OEIS)      | Pre-existing           |
+| 2  | 2,480                | —            | Known (OEIS)      | Pre-existing           |
+| 3  | 8,178                | —            | Known (OEIS)      | Pre-existing           |
+| 4  | 45,153               | —            | Known (OEIS)      | Pre-existing           |
+| 5  | 3,648,841            | —            | Known (OEIS)      | Pre-existing           |
+| 6  | 7,979,090            | —            | Known (OEIS)      | Pre-existing           |
+| 7  | 101,130,029          | —            | Known (OEIS)      | Pre-existing           |
+| 8  | 339,949,252          | 0–340M       | Found 2025-01-17  | Complete (2026-03-16)  |
+| 9  | 1,019,547,844        | 0–17.6B      | Corrected by `validate` 2026-03-16 | Complete (2026-03-16)  |
+| 10 | 17,609,764,994       | 0–17.6B      | Found 2025-01-20  | Complete (2026-03-16)  |
+| 11 | 1,070,858,041,585    | 0–2T         | Found 2026-02-09  | Complete (2026-03-13)  |
+| 12 | 5,048,891,644,646    | 0–6.15T      | Found 2026-02-11  | Complete (2026-03-12)  |
+| 13 | 18,253,129,921,842   | 0–25T        | Found 2026-02-16  | Complete (2026-03-11)  |
+
+The March 16, 2026 `k=9` validate pass found a smaller witness at
+`n = 1,019,547,844`. The previously reported `17,609,764,993` remains a valid
+`k=9` witness from the governor-run search, but it is not minimal.
+
+The `validate` minimality certificate is a separate per-`k` pass. As of 2026-03-16,
+the full small-prime certificate has been completed for `k=8` through `k=13`.
+The public certificate bundle lives in `certificates/validate/`, with manifest
+files named by the validated range rather than by internal machine nicknames.
+Each certified `k` is represented by two partition reports, two range manifests,
+a partition-check record, and directory-wide checksums. The `k=9` bundle also
+includes an independent witness recheck for the corrected minimum. The filenames are public
+and range-based; the manifest contents still preserve the actual host, command
+line, commit, and binary SHA-256 used for that partition.
 
 ## How to verify our claims
 
@@ -43,6 +57,34 @@ cargo run --release --bin validate -- -k 13 --start 0 --end 18253129921842 --wor
 
 # 3b. Independently check the validate report invariants (seconds, stdlib-only)
 python3 scripts/check_validate_report.py validate_checkpoints/validate_report_k13_0_18253129921842.json
+
+# 4. Verify the public certificate bundles for k=8 through k=13 (seconds)
+sha256sum -c certificates/validate/SHA256SUMS
+python3 scripts/check_validate_report.py \
+  certificates/validate/validate_report_k8_0_169974626.json \
+  certificates/validate/validate_report_k8_169974626_339949252.json \
+  --check-partition
+python3 scripts/check_validate_report.py \
+  certificates/validate/validate_report_k9_0_8804882496.json \
+  certificates/validate/validate_report_k9_8804882496_17609764993.json \
+  --check-partition
+python3 scripts/verify_witness.py -k 9 -n 1019547844
+python3 scripts/check_validate_report.py \
+  certificates/validate/validate_report_k10_0_8804882497.json \
+  certificates/validate/validate_report_k10_8804882497_17609764994.json \
+  --check-partition
+python3 scripts/check_validate_report.py \
+  certificates/validate/validate_report_k11_0_610796592505.json \
+  certificates/validate/validate_report_k11_610796592505_1070858041585.json \
+  --check-partition
+python3 scripts/check_validate_report.py \
+  certificates/validate/validate_report_k12_0_2880387737783.json \
+  certificates/validate/validate_report_k12_2880387737783_5048891644646.json \
+  --check-partition
+python3 scripts/check_validate_report.py \
+  certificates/validate/validate_report_k13_0_9684496742351.json \
+  certificates/validate/validate_report_k13_9684496742351_18253129921842.json \
+  --check-partition
 ```
 
 Command (1) confirms each claimed witness satisfies the divisibility condition.
@@ -51,7 +93,9 @@ restricting the `validate` *screen* to the barrier primes p < 2k+1 (Corollary 6)
 Command (3) enumerates every n in the range, screens at those primes, and fully
 verifies any screen-pass candidates; this yields a computational certificate of
 minimality under the standard trust assumptions for software and hardware. See
-`docs/trust.md`. For a reviewer-oriented checklist, see `docs/reproducibility.md`.
+`docs/trust.md`. Command (4) checks the published `k=8` through `k=13`
+certificate artifacts in `certificates/validate/`. For a reviewer-oriented checklist, see
+`docs/reproducibility.md`.
 
 For additional runtime confidence on a given machine, both `erdos396` and `validate`
 support optional startup/periodic cross-checks (see `docs/reproducibility.md`).

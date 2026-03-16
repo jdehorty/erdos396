@@ -411,7 +411,7 @@ mod tests {
             10_000_000_000u64,
             10_000_000_001,
             339_949_252,      // k=8 witness
-            17_609_764_993,   // k=9 witness
+            1_019_547_844,    // corrected k=9 minimum witness
             u64::MAX / 2 - 1, // near overflow boundary
         ] {
             let legendre = vp_central_binom(n, 2);
@@ -472,7 +472,7 @@ mod tests {
             10_000_000_000u64,
             10_000_000_001,
             339_949_252,
-            17_609_764_993,
+            1_019_547_844,
             u64::MAX / 2 - 1,
         ] {
             let l3 = vp_central_binom(n, 3);
@@ -514,7 +514,7 @@ mod tests {
     fn test_kummer_fast_large_numbers() {
         let primes = [7u64, 11, 13, 17, 19, 97, 997];
         for &p in &primes {
-            for &n in &[10_000_000_000u64, 339_949_252, 17_609_764_993] {
+            for &n in &[10_000_000_000u64, 339_949_252, 1_019_547_844] {
                 let legendre = vp_central_binom(n, p);
                 let kummer = vp_central_binom_kummer_fast(n, p);
                 assert_eq!(
@@ -564,7 +564,7 @@ mod tests {
         for &n in &[
             10_000_000_000u64,
             339_949_252,
-            17_609_764_993,
+            1_019_547_844,
             u64::MAX / 2 - 1,
         ] {
             // Verify const-generic matches Legendre for all barrier primes

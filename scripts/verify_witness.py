@@ -34,7 +34,7 @@ KNOWN_WITNESSES: List[Tuple[int, int]] = [
     (6, 7979090),
     (7, 101130029),
     (8, 339949252),
-    (9, 17609764993),
+    (9, 1019547844),
     (10, 17609764994),
     (11, 1070858041585),
     (12, 5048891644646),
@@ -179,4 +179,3 @@ def main(argv: Iterable[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-
