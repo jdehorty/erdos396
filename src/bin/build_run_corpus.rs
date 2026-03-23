@@ -24,6 +24,10 @@ struct Cli {
 
     #[arg(long = "extra-v3-dir")]
     extra_v3_dirs: Vec<PathBuf>,
+
+    /// Append to existing corpus instead of replacing it
+    #[arg(long, default_value_t = false)]
+    append: bool,
 }
 
 fn main() -> Result<()> {
@@ -35,6 +39,7 @@ fn main() -> Result<()> {
         max_length: cli.max_length,
         include_overlaps: cli.include_overlaps,
         extra_v3_dirs: cli.extra_v3_dirs,
+        append: cli.append,
     })?;
 
     println!("{}", serde_json::to_string_pretty(&stats)?);

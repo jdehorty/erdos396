@@ -68,6 +68,7 @@ pub struct BuildRunCorpusConfig {
     pub max_length: usize,
     pub include_overlaps: bool,
     pub extra_v3_dirs: Vec<PathBuf>,
+    pub append: bool,
 }
 
 impl Default for BuildRunCorpusConfig {
@@ -79,6 +80,7 @@ impl Default for BuildRunCorpusConfig {
             max_length: 14,
             include_overlaps: false,
             extra_v3_dirs: Vec::new(),
+            append: false,
         }
     }
 }

@@ -78,7 +78,9 @@ pub fn build_run_corpus(config: &BuildRunCorpusConfig) -> Result<BuildRunCorpusS
         ));
     }
 
-    prepare_build_output(&config.output_root)?;
+    if !config.append {
+        prepare_build_output(&config.output_root)?;
+    }
     let mut maximal_writer = maximal_run_writer(&config.output_root);
     let mut window_writer = run_window_writer(&config.output_root);
     let mut stats = BuildRunCorpusStats::default();
@@ -711,7 +713,7 @@ fn event_key(checkpoint_id: &str, run_length: u32, n: u64) -> Option<EventKey> {
 fn relative_path_string(root: &Path, path: &Path) -> Result<String> {
     Ok(path
         .strip_prefix(root)
-        .with_context(|| format!("strip prefix {} from {}", root.display(), path.display()))?
+        .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/"))
 }
@@ -781,6 +783,7 @@ mod tests {
             min_length: 6,
             max_length: 14,
             include_overlaps: false,
+            ..Default::default()
         })
         .unwrap();
 
@@ -838,6 +841,7 @@ mod tests {
             min_length: 6,
             max_length: 14,
             include_overlaps: true,
+            ..Default::default()
         })
         .unwrap();
 
@@ -873,6 +877,7 @@ mod tests {
             min_length: 6,
             max_length: 14,
             include_overlaps: false,
+            ..Default::default()
         })
         .unwrap();
 

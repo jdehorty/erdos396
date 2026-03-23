@@ -215,6 +215,7 @@ mod tests {
             min_length: 6,
             max_length: 14,
             include_overlaps: false,
+            ..Default::default()
         })
         .unwrap();
 
