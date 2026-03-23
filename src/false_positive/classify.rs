@@ -109,9 +109,7 @@ pub fn classify_run_windows(config: &ClassificationConfig) -> Result<Classificat
     let verifier = WitnessVerifier::new(max_n.max(1000));
     let verified_at_utc = Utc::now().to_rfc3339();
     let invocation_id = verified_at_utc
-        .replace(':', "")
-        .replace('-', "")
-        .replace('.', "")
+        .replace([':', '-', '.'], "")
         .replace('+', "plus");
     let build_git_hash = BuildInfo::gather()
         .git_hash
