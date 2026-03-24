@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn persists_false_positive_classification() {
         let fixture = tempdir().unwrap();
-        let archive_root = fixture.path().join("archives/server_a_k12_10T-15T");
+        let archive_root = fixture.path().join("archives/chi_k12_10T-15T");
         std::fs::create_dir_all(&archive_root).unwrap();
 
         let false_positive_n = 5_431_258_726_986u64;

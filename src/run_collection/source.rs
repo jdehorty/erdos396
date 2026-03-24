@@ -748,7 +748,7 @@ mod tests {
         write_v2_checkpoint(
             fixture
                 .path()
-                .join("archives/server_b_k12_5T-10T/checkpoint_k12_w00.json"),
+                .join("archives/honeybear_k12_5T-10T/checkpoint_k12_w00.json"),
             12,
             0,
             vec![RunInfo {
@@ -763,7 +763,7 @@ mod tests {
         write_v2_checkpoint(
             fixture
                 .path()
-                .join("archives/server_a_k12_gap_5T-6.15T/gap_00/checkpoint_k12_w00.json"),
+                .join("archives/chi_k12_gap_5T-6.15T/gap_00/checkpoint_k12_w00.json"),
             12,
             0,
             vec![RunInfo {
@@ -806,7 +806,7 @@ mod tests {
         write_v2_checkpoint(
             fixture
                 .path()
-                .join("archives/server_b_k12_5T-10T/checkpoint_k12_w00.json"),
+                .join("archives/honeybear_k12_5T-10T/checkpoint_k12_w00.json"),
             12,
             0,
             vec![RunInfo {
@@ -821,7 +821,7 @@ mod tests {
         write_v2_checkpoint(
             fixture
                 .path()
-                .join("archives/server_a_k12_gap_5T-6.15T/gap_00/checkpoint_k12_w00.json"),
+                .join("archives/chi_k12_gap_5T-6.15T/gap_00/checkpoint_k12_w00.json"),
             12,
             0,
             vec![RunInfo {
@@ -862,7 +862,7 @@ mod tests {
     fn v3_run_logs_attach_recorded_witness_only_to_matching_window() {
         let fixture = tempdir().unwrap();
         write_v3_fixture(
-            fixture.path().join("archives/server_a_k13_15T-25T"),
+            fixture.path().join("archives/chi_k13_15T-25T"),
             18_253_129_921_829,
             14,
             0,

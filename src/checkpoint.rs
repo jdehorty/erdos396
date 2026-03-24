@@ -82,6 +82,14 @@ pub struct Checkpoint {
     #[serde(default)]
     pub current_run_start: u64,
 
+    /// Length of the consecutive-Governor prefix starting at `start`.
+    ///
+    /// This counts how many consecutive governors appear from the very beginning
+    /// of the worker's range. Used by the aggregation pass to stitch runs that
+    /// cross worker boundaries.
+    #[serde(default)]
+    pub prefix_run: usize,
+
     /// Number of integers checked so far
     pub checked: u64,
 
@@ -156,7 +164,7 @@ pub struct Checkpoint {
 }
 
 fn default_version() -> u32 {
-    4 // v4: v3 + coverage invariants
+    5 // v5: v4 + prefix_run for boundary stitching
 }
 
 fn default_significant_threshold() -> usize {
@@ -219,6 +227,7 @@ impl Checkpoint {
             current_pos: start,
             current_run: 0,
             current_run_start: start,
+            prefix_run: 0,
             checked: 0,
             sum_checked: 0,
             xor_checked: 0,
@@ -237,7 +246,7 @@ impl Checkpoint {
             safety_net_alerts: 0,
             timestamp: Utc::now(),
             worker_id: None,
-            version: 4,
+            version: 5,
         }
     }
 
@@ -358,7 +367,7 @@ impl Checkpoint {
 
         // Temporarily take significant_runs out, save slim, put back
         let runs = std::mem::take(&mut self.significant_runs);
-        self.version = 4;
+        self.version = 5;
         self.save(&tmp_path)?;
         self.significant_runs = runs;
 
@@ -665,7 +674,7 @@ mod tests {
         // Load and verify significant_runs is empty in the file
         let loaded = Checkpoint::load(tmp.path()).unwrap();
         assert!(loaded.significant_runs.is_empty());
-        assert_eq!(loaded.version, 4);
+        assert_eq!(loaded.version, 5);
 
         // But the in-memory checkpoint still has them
         assert_eq!(cp.significant_runs.len(), 1);
