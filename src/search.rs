@@ -455,8 +455,8 @@ impl SearchWorker {
 
         // Prefix tracking: count consecutive governors from the start of the range.
         // If we're resuming and have already seen a non-governor, prefix is complete.
-        let mut prefix_complete = checkpoint.checked > 0
-            && (checkpoint.prefix_run as u64) < checkpoint.checked;
+        let mut prefix_complete =
+            checkpoint.checked > 0 && (checkpoint.prefix_run as u64) < checkpoint.checked;
 
         // Safety-net: ring buffer tracking governor membership for last (k+1) positions
         let k = (self.target_run_length - 1) as u32;
@@ -692,8 +692,8 @@ impl SearchWorker {
         let mut checkpoint_counter = 0u64;
 
         // Prefix tracking: count consecutive governors from the start of the range.
-        let mut prefix_complete = checkpoint.checked > 0
-            && (checkpoint.prefix_run as u64) < checkpoint.checked;
+        let mut prefix_complete =
+            checkpoint.checked > 0 && (checkpoint.prefix_run as u64) < checkpoint.checked;
 
         for n in search_start..end {
             if progress.should_stop.load(Ordering::Relaxed) {
@@ -1170,11 +1170,13 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
         let mut stitch_len = results[0].current_run;
         let mut stitch_start = results[0].current_run_start;
         // Track fragment lengths so we can fix run_distribution after stitching.
-        let mut fragment_lengths: Vec<usize> =
-            if stitch_len > 0 { vec![stitch_len] } else { vec![] };
+        let mut fragment_lengths: Vec<usize> = if stitch_len > 0 {
+            vec![stitch_len]
+        } else {
+            vec![]
+        };
 
-        for i in 1..results.len() {
-            let cp = &results[i];
+        for cp in &results[1..] {
             let prefix = cp.prefix_run;
 
             if stitch_len > 0 && prefix > 0 {
@@ -1213,7 +1215,8 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                         if result.is_valid {
                             log::error!(
                                 "*** VERIFIED WITNESS FOUND (boundary stitch): k={}, n={} ***",
-                                k, candidate_n
+                                k,
+                                candidate_n
                             );
                             witnesses.push(candidate_n);
                         } else if let Some(failing_p) = result.failing_prime {
@@ -2119,7 +2122,7 @@ mod tests {
         let original_prefix = cp.prefix_run;
         cp.version = 4;
         cp.prefix_run = 0; // simulate v4 (no prefix_run field)
-        // Reset to a mid-scan position so the migration has something to recompute
+                           // Reset to a mid-scan position so the migration has something to recompute
         cp.current_pos = 5;
         cp.checked = 4;
         cp.sum_checked = sum_range_u128(1, 5);
