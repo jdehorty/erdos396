@@ -1019,6 +1019,28 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                                 );
                                 cp.significant_run_threshold = config.significant_run_threshold;
                             }
+                            // v4 → v5 migration: recompute prefix_run for legacy checkpoints.
+                            // A v4 checkpoint loads with prefix_run=0 via #[serde(default)],
+                            // which is indistinguishable from "range starts with a non-governor".
+                            // Recompute by scanning from the range start.
+                            if cp.version < 5 && cp.checked > 0 {
+                                let checker = GovernorChecker::with_sieve(sieve.clone());
+                                let mut prefix = 0usize;
+                                for n in cp.start..cp.current_pos {
+                                    if checker.is_governor(n) {
+                                        prefix += 1;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                cp.prefix_run = prefix;
+                                cp.version = 5;
+                                log::info!(
+                                    "Worker {} migrated to v5: recomputed prefix_run={}",
+                                    worker_id,
+                                    prefix
+                                );
+                            }
                             log::info!("Worker {} resuming from checkpoint", worker_id);
                             cp
                         } else {
@@ -1137,20 +1159,28 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
     // Each worker's `current_run` is the suffix (consecutive governors at the tail),
     // and `prefix_run` is the prefix (consecutive governors from the start of the range).
     // Adjacent workers' suffix + prefix may form a longer run that neither worker saw.
+    //
+    // Fragment accounting: each suffix/prefix/full-range fragment was already counted
+    // in `run_distribution` by the individual worker. When we stitch, we remove the
+    // fragment counts and add one count for the combined length.
     let target_run_length = (config.target_k + 1) as usize;
     if results.len() > 1 {
-        let verifier = WitnessVerifier::with_sieve(sieve.clone());
+        let verifier = WitnessVerifier::with_sieve(sieve);
 
         let mut stitch_len = results[0].current_run;
         let mut stitch_start = results[0].current_run_start;
+        // Track fragment lengths so we can fix run_distribution after stitching.
+        let mut fragment_lengths: Vec<usize> =
+            if stitch_len > 0 { vec![stitch_len] } else { vec![] };
 
         for i in 1..results.len() {
             let cp = &results[i];
             let prefix = cp.prefix_run;
 
             if stitch_len > 0 && prefix > 0 {
-                // The suffix of the previous group continues into this worker's prefix
+                let stitch_len_before = stitch_len;
                 stitch_len += prefix;
+                fragment_lengths.push(prefix);
 
                 // Update longest run if the stitched run is longer
                 if stitch_len > longest_run {
@@ -1158,15 +1188,13 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                     longest_run_start = stitch_start;
                 }
 
-                // Record stitched run in distribution
-                // (The fragments were already recorded by individual workers, but the
-                // combined run was not. We add an entry for the full stitched length
-                // and remove the fragment entries to keep the distribution accurate.)
-                *run_distribution.entry(stitch_len).or_insert(0) += 1;
-
-                // Check if the stitched run reaches target length
-                if stitch_len >= target_run_length {
-                    let candidate_n = cp.start + prefix as u64 - 1;
+                // Emit a boundary candidate only if the stitch *newly* crosses the
+                // target threshold. If the suffix alone already reached target length,
+                // that candidate was already handled by the owning worker.
+                if stitch_len >= target_run_length && stitch_len_before < target_run_length {
+                    // Match single-worker semantics: the candidate position is the n
+                    // where the run first reaches target length.
+                    let candidate_n = stitch_start + target_run_length as u64 - 1;
                     log::warn!(
                         "Boundary stitch found candidate run of {} at n={} (across workers)",
                         stitch_len,
@@ -1217,12 +1245,65 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                 if prefix as u64 == cp.checked {
                     continue;
                 }
+
+                // Stitch is complete — fix run_distribution by replacing fragments
+                // with the stitched whole.
+                if fragment_lengths.len() > 1 {
+                    for &frag in &fragment_lengths {
+                        if frag >= 2 {
+                            if let Some(count) = run_distribution.get_mut(&frag) {
+                                *count = count.saturating_sub(1);
+                            }
+                        }
+                    }
+                    if stitch_len >= 2 {
+                        *run_distribution.entry(stitch_len).or_insert(0) += 1;
+                    }
+                }
+                fragment_lengths.clear();
+            } else {
+                // Chain broken (previous suffix > 0 but this prefix == 0, or
+                // previous suffix == 0). Flush any pending multi-fragment stitch
+                // before resetting, so the distribution replaces the individual
+                // fragment entries with the stitched whole.
+                if fragment_lengths.len() > 1 {
+                    for &frag in &fragment_lengths {
+                        if frag >= 2 {
+                            if let Some(count) = run_distribution.get_mut(&frag) {
+                                *count = count.saturating_sub(1);
+                            }
+                        }
+                    }
+                    if stitch_len >= 2 {
+                        *run_distribution.entry(stitch_len).or_insert(0) += 1;
+                    }
+                }
+                fragment_lengths.clear();
             }
 
             // Reset to this worker's suffix
             stitch_len = cp.current_run;
             stitch_start = cp.current_run_start;
+            if stitch_len > 0 {
+                fragment_lengths.push(stitch_len);
+            }
         }
+
+        // Flush any pending stitch at the end (e.g. chain ending at the last worker).
+        if fragment_lengths.len() > 1 {
+            for &frag in &fragment_lengths {
+                if frag >= 2 {
+                    if let Some(count) = run_distribution.get_mut(&frag) {
+                        *count = count.saturating_sub(1);
+                    }
+                }
+            }
+            if stitch_len >= 2 {
+                *run_distribution.entry(stitch_len).or_insert(0) += 1;
+            }
+        }
+
+        run_distribution.retain(|_, count| *count > 0);
     }
 
     candidates.sort();
@@ -1653,7 +1734,7 @@ mod tests {
             cp.significant_runs.is_empty(),
             "v4 checkpoint should have empty significant_runs"
         );
-        assert_eq!(cp.version, 4, "Checkpoint should be version 4");
+        assert_eq!(cp.version, 5, "Checkpoint should be version 5");
 
         // Coverage invariants should match the assigned worker range.
         assert_eq!(cp.checked, config.end - config.start);
@@ -1733,6 +1814,28 @@ mod tests {
         );
     }
 
+    /// Helper: run parallel_search with the given worker count on the k=8 witness range.
+    fn search_k8_witness_range(num_workers: usize, no_prefilter: bool) -> SearchResult {
+        let dir = tempdir().unwrap();
+        let config = SearchConfig {
+            target_k: 8,
+            start: 339_949_244,
+            end: 339_949_253,
+            num_workers,
+            checkpoint_interval: 1_000_000,
+            output_dir: dir.path().to_path_buf(),
+            significant_run_threshold: 6,
+            verify_candidates: true,
+            report_interval: Duration::from_secs(60),
+            no_prefilter,
+            full_verify: true,
+            safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
+        };
+        parallel_search(&config).unwrap()
+    }
+
     #[test]
     fn test_multiworker_does_not_miss_run_crossing_worker_boundary() {
         // Regression test for GitHub issue #2:
@@ -1740,52 +1843,14 @@ mod tests {
         // [339,949,244 .. 339,949,252]. With 2 workers and range [339949244, 339949253),
         // the boundary at 339,949,248 splits the run and neither worker sees target length.
 
-        // First, verify the single-worker case finds the witness (baseline).
-        let dir1 = tempdir().unwrap();
-        let config_1w = SearchConfig {
-            target_k: 8,
-            start: 339_949_244,
-            end: 339_949_253,
-            num_workers: 1,
-            checkpoint_interval: 1_000_000,
-            output_dir: dir1.path().to_path_buf(),
-            significant_run_threshold: 6,
-            verify_candidates: true,
-            report_interval: Duration::from_secs(60),
-            no_prefilter: false,
-            full_verify: true,
-            safety_net: false,
-            fused_self_check_samples: 0,
-            fused_audit_interval: 0,
-        };
-
-        let result_1w = parallel_search(&config_1w).unwrap();
+        let result_1w = search_k8_witness_range(1, false);
         assert!(
             result_1w.witnesses.contains(&339_949_252),
             "Single worker should find k=8 witness at n=339,949,252, got witnesses: {:?}",
             result_1w.witnesses
         );
 
-        // Now test with 2 workers — this is the bug scenario.
-        let dir2 = tempdir().unwrap();
-        let config_2w = SearchConfig {
-            target_k: 8,
-            start: 339_949_244,
-            end: 339_949_253,
-            num_workers: 2,
-            checkpoint_interval: 1_000_000,
-            output_dir: dir2.path().to_path_buf(),
-            significant_run_threshold: 6,
-            verify_candidates: true,
-            report_interval: Duration::from_secs(60),
-            no_prefilter: false,
-            full_verify: true,
-            safety_net: false,
-            fused_self_check_samples: 0,
-            fused_audit_interval: 0,
-        };
-
-        let result_2w = parallel_search(&config_2w).unwrap();
+        let result_2w = search_k8_witness_range(2, false);
         assert!(
             result_2w.witnesses.contains(&339_949_252),
             "Two workers should also find k=8 witness at n=339,949,252 via boundary stitching, got witnesses: {:?}",
@@ -1796,25 +1861,7 @@ mod tests {
     #[test]
     fn test_multiworker_boundary_stitch_linear() {
         // Same boundary-crossing test but using the linear (--no-prefilter) path.
-        let dir = tempdir().unwrap();
-        let config = SearchConfig {
-            target_k: 8,
-            start: 339_949_244,
-            end: 339_949_253,
-            num_workers: 2,
-            checkpoint_interval: 1_000_000,
-            output_dir: dir.path().to_path_buf(),
-            significant_run_threshold: 6,
-            verify_candidates: true,
-            report_interval: Duration::from_secs(60),
-            no_prefilter: true,
-            full_verify: true,
-            safety_net: false,
-            fused_self_check_samples: 0,
-            fused_audit_interval: 0,
-        };
-
-        let result = parallel_search(&config).unwrap();
+        let result = search_k8_witness_range(2, true);
         assert!(
             result.witnesses.contains(&339_949_252),
             "Linear mode with 2 workers should find k=8 witness via boundary stitching, got witnesses: {:?}",
@@ -1823,13 +1870,31 @@ mod tests {
     }
 
     #[test]
+    fn test_multiworker_witness_parity_across_worker_counts() {
+        // w=1, w=2, and w=3 must all produce the same witnesses set on the repro range.
+        let w1 = search_k8_witness_range(1, false);
+        let w2 = search_k8_witness_range(2, false);
+        let w3 = search_k8_witness_range(3, false);
+
+        assert_eq!(
+            w1.witnesses, w2.witnesses,
+            "w=1 and w=2 should find the same witnesses: {:?} vs {:?}",
+            w1.witnesses, w2.witnesses
+        );
+        assert_eq!(
+            w1.witnesses, w3.witnesses,
+            "w=1 and w=3 should find the same witnesses: {:?} vs {:?}",
+            w1.witnesses, w3.witnesses
+        );
+    }
+
+    #[test]
     fn test_prefix_run_tracking() {
         // Verify that prefix_run is correctly tracked for each worker.
-        // Use a small range where we know the governor membership.
-        // Governors in [1, 10): 1, 2, 4, 6, 8 (even composites and 1,2)
+        // Governors in [1, 10): 1, 2, 4, 6, 8
         // With 2 workers: worker 0 = [1, 5), worker 1 = [5, 10)
-        // Worker 0 governors: 1, 2, 4 → prefix_run = 2 (1,2 are consecutive governors, 3 is not)
-        // Worker 1 governors: 6, 8 → prefix_run = 0 (5 is not a governor)
+        // Worker 0: prefix = 2 (governors 1,2; then 3 is not a governor)
+        // Worker 1: prefix = 0 (5 is odd prime, not a governor)
         let dir = tempdir().unwrap();
         let config = SearchConfig {
             target_k: 1,
@@ -1850,23 +1915,231 @@ mod tests {
 
         let result = parallel_search(&config).unwrap();
 
-        // Check that the worker checkpoints have prefix_run set
         assert_eq!(result.worker_checkpoints.len(), 2);
         let w0 = &result.worker_checkpoints[0];
         let w1 = &result.worker_checkpoints[1];
 
-        // Worker 0 starts at 1; 1 and 2 are both governors, 3 is not → prefix_run = 2
         assert_eq!(
             w0.prefix_run, 2,
             "Worker 0 should have prefix_run=2 (governors 1,2), got {}",
             w0.prefix_run
         );
-
-        // Worker 1 starts at 5; 5 is prime (odd) → not a governor → prefix_run = 0
         assert_eq!(
             w1.prefix_run, 0,
             "Worker 1 should have prefix_run=0 (5 is not a governor), got {}",
             w1.prefix_run
+        );
+    }
+
+    #[test]
+    fn test_resume_preserves_prefix_run() {
+        // Verify that prefix_run is correctly preserved across checkpoint resume.
+        // Run a search that saves a checkpoint mid-worker, then resume and confirm
+        // prefix_run is still correct.
+        let dir = tempdir().unwrap();
+
+        let end = 5u64;
+        let sieve = PrimeSieve::for_range(end);
+        let prefilter = PrimeSieve::new(100);
+        let prefilter_primes = Arc::new(prefilter.primes().to_vec());
+
+        let worker = SearchWorker::new(
+            0,
+            sieve,
+            1,     // k
+            true,  // verify candidates
+            false, // use fused
+            true,  // full verify
+            false,
+            prefilter_primes,
+            0,
+            0,
+        );
+
+        let progress = GlobalProgress::new();
+        let checkpoint_path = dir.path().join("checkpoint_k1_w00.json");
+        let run_log_path = dir.path().join("runs_k1_w00.jsonl");
+        let mut run_logger = RunLogger::new(&run_log_path).unwrap();
+
+        // Simulate a saved checkpoint after processing n=1 (a governor, prefix still going).
+        let mut checkpoint = Checkpoint::new_worker(1, 1, end, 0);
+        checkpoint.current_pos = 2;
+        checkpoint.current_run = 1;
+        checkpoint.current_run_start = 1;
+        checkpoint.prefix_run = 1; // one governor seen from start
+        checkpoint.checked = 1;
+        checkpoint.sum_checked = sum_range_u128(checkpoint.start, checkpoint.current_pos);
+        checkpoint.xor_checked = xor_range(checkpoint.start, checkpoint.current_pos);
+        checkpoint.governor_count = 1;
+
+        worker
+            .search_linear(
+                checkpoint.current_pos,
+                &mut checkpoint,
+                &progress,
+                &checkpoint_path,
+                10,
+                &mut run_logger,
+            )
+            .unwrap();
+
+        // After resume: 1 and 2 are both governors, 3 is not.
+        // prefix_run should be 2 (1 from before + 1 from resume).
+        assert_eq!(
+            checkpoint.prefix_run, 2,
+            "prefix_run should be 2 after resume (1+2 are governors, 3 is not), got {}",
+            checkpoint.prefix_run
+        );
+        assert!(
+            checkpoint.witnesses.contains(&2),
+            "Should still find k=1 witness at n=2"
+        );
+    }
+
+    #[test]
+    fn test_multiworker_3_worker_chain() {
+        // 3-worker search on the k=8 witness range [339949244, 339949253).
+        // Range size = 9, so: worker 0 = [339949244, 339949247) (3 numbers),
+        // worker 1 = [339949247, 339949250) (3 numbers),
+        // worker 2 = [339949250, 339949253) (3 numbers).
+        // All 9 numbers are governors, so workers 0 and 1 are entirely governors.
+        // The stitching must chain all three to find the run of 9.
+        let result = search_k8_witness_range(3, false);
+        assert!(
+            result.witnesses.contains(&339_949_252),
+            "3-worker search should find k=8 witness via chained boundary stitching, got witnesses: {:?}",
+            result.witnesses
+        );
+
+        // Verify chain: workers 0 and 1 should be entirely governors (prefix == checked).
+        assert_eq!(result.worker_checkpoints.len(), 3);
+        let w0 = &result.worker_checkpoints[0];
+        let w1 = &result.worker_checkpoints[1];
+        assert_eq!(
+            w0.prefix_run as u64, w0.checked,
+            "Worker 0 should be entirely governors (prefix_run={}, checked={})",
+            w0.prefix_run, w0.checked
+        );
+        assert_eq!(
+            w1.prefix_run as u64, w1.checked,
+            "Worker 1 should be entirely governors (prefix_run={}, checked={})",
+            w1.prefix_run, w1.checked
+        );
+    }
+
+    #[test]
+    fn test_boundary_stitch_distribution_correctness() {
+        // Regression test: when a chain of entirely-governor workers terminates
+        // because the next worker has prefix=0 (the else branch in stitching),
+        // the fragment entries must be replaced in run_distribution.
+        //
+        // Range [339949244, 339949256): 9 consecutive governors followed by numbers
+        // that include non-governors.  With 4 workers of size 3:
+        //   W0 [339949244, 339949247) - entirely governors
+        //   W1 [339949247, 339949250) - entirely governors
+        //   W2 [339949250, 339949253) - entirely governors
+        //   W3 [339949253, 339949256) - starts with a non-governor (prefix=0)
+        //
+        // The stitching else branch handles W3, which must flush the pending
+        // 3-fragment chain before resetting.  Before the fix, fragment entries
+        // remained and the stitched length was never recorded.
+        let dir_1w = tempdir().unwrap();
+        let dir_4w = tempdir().unwrap();
+
+        let base = SearchConfig {
+            target_k: 8,
+            start: 339_949_244,
+            end: 339_949_256,
+            num_workers: 1,
+            checkpoint_interval: 1_000_000,
+            output_dir: dir_1w.path().to_path_buf(),
+            significant_run_threshold: 6,
+            verify_candidates: true,
+            report_interval: Duration::from_secs(60),
+            no_prefilter: false,
+            full_verify: true,
+            safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
+        };
+
+        let config_1w = base.clone();
+        let config_4w = SearchConfig {
+            num_workers: 4,
+            output_dir: dir_4w.path().to_path_buf(),
+            ..base
+        };
+
+        let result_1w = parallel_search(&config_1w).unwrap();
+        let result_4w = parallel_search(&config_4w).unwrap();
+
+        assert_eq!(
+            result_1w.run_distribution, result_4w.run_distribution,
+            "run_distribution must match between 1-worker and 4-worker searches.\n  \
+             1-worker: {:?}\n  4-worker: {:?}",
+            result_1w.run_distribution, result_4w.run_distribution
+        );
+
+        assert_eq!(
+            result_1w.witnesses, result_4w.witnesses,
+            "Witnesses must match between 1-worker and 4-worker searches"
+        );
+    }
+
+    #[test]
+    fn test_v4_checkpoint_prefix_migration() {
+        // Simulate loading a v4 checkpoint (no prefix_run) and verify the v5 migration
+        // recomputes prefix_run correctly.
+        let dir = tempdir().unwrap();
+
+        // First run: create a v4-style checkpoint by running a small search,
+        // then manually downgrade the version and clear prefix_run.
+        let config = SearchConfig {
+            target_k: 1,
+            start: 1,
+            end: 10,
+            num_workers: 1,
+            checkpoint_interval: 3, // checkpoint after 3 numbers
+            output_dir: dir.path().to_path_buf(),
+            significant_run_threshold: 2,
+            verify_candidates: true,
+            report_interval: Duration::from_secs(60),
+            no_prefilter: false,
+            full_verify: true,
+            safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
+        };
+
+        let _ = parallel_search(&config).unwrap();
+
+        // Load the checkpoint and downgrade it to v4
+        let cp_path = dir.path().join("checkpoint_k1_w00.json");
+        let mut cp = Checkpoint::load(&cp_path).unwrap();
+        let original_prefix = cp.prefix_run;
+        cp.version = 4;
+        cp.prefix_run = 0; // simulate v4 (no prefix_run field)
+        // Reset to a mid-scan position so the migration has something to recompute
+        cp.current_pos = 5;
+        cp.checked = 4;
+        cp.sum_checked = sum_range_u128(1, 5);
+        cp.xor_checked = xor_range(1, 5);
+        cp.save(&cp_path).unwrap();
+
+        // Run search again — it should resume from the v4 checkpoint and migrate prefix_run.
+        let result = parallel_search(&config).unwrap();
+        let migrated_cp = &result.worker_checkpoints[0];
+
+        // Governors in [1, 5): 1, 2 are governors, 3 is not.
+        // So prefix_run should be 2 after migration.
+        assert_eq!(
+            migrated_cp.prefix_run, original_prefix,
+            "v4→v5 migration should recompute prefix_run={}, got {}",
+            original_prefix, migrated_cp.prefix_run
+        );
+        assert_eq!(
+            migrated_cp.version, 5,
+            "Checkpoint should be upgraded to v5"
         );
     }
 }

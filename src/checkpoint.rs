@@ -164,7 +164,7 @@ pub struct Checkpoint {
 }
 
 fn default_version() -> u32 {
-    4 // v4: v3 + coverage invariants
+    5 // v5: v4 + prefix_run for boundary stitching
 }
 
 fn default_significant_threshold() -> usize {
@@ -246,7 +246,7 @@ impl Checkpoint {
             safety_net_alerts: 0,
             timestamp: Utc::now(),
             worker_id: None,
-            version: 4,
+            version: 5,
         }
     }
 
@@ -367,7 +367,7 @@ impl Checkpoint {
 
         // Temporarily take significant_runs out, save slim, put back
         let runs = std::mem::take(&mut self.significant_runs);
-        self.version = 4;
+        self.version = 5;
         self.save(&tmp_path)?;
         self.significant_runs = runs;
 
@@ -674,7 +674,7 @@ mod tests {
         // Load and verify significant_runs is empty in the file
         let loaded = Checkpoint::load(tmp.path()).unwrap();
         assert!(loaded.significant_runs.is_empty());
-        assert_eq!(loaded.version, 4);
+        assert_eq!(loaded.version, 5);
 
         // But the in-memory checkpoint still has them
         assert_eq!(cp.significant_runs.len(), 1);
