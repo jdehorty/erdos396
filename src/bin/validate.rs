@@ -328,13 +328,14 @@ mod tests {
     #[test]
     fn test_validate_batch_matches_naive_large_prime_failures() {
         let cases = [
+            (1u64, 26usize), // tiny: for k>=13, sieve_limit < barrier_threshold
             (0u64, 512usize),
             (10_000u64, 1024usize),
             (1_000_000u64, 2048usize),
             (25_000_000_000_000u64 - 4096, 4096usize),
         ];
 
-        for k in 1u32..=8 {
+        for k in 1u32..=13 {
             let barrier_threshold = 2 * k as u64 + 1;
             for &(lo, len) in &cases {
                 let max_n = lo + len as u64 - 1;
@@ -352,6 +353,39 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Regression test for GitHub issue #1: when sieve_limit < barrier_threshold,
+    /// the post-sieve residual check must not classify a small barrier prime as a
+    /// large-prime failure.  k=13 gives barrier_threshold=27; with lo=1, len=26
+    /// we get max_n=26, sieve_limit=floor(sqrt(52))+1=8, well below 27.
+    #[test]
+    fn test_validate_batch_small_sieve_limit_below_barrier() {
+        let k = 13u32;
+        let barrier_threshold = 2 * k as u64 + 1; // 27
+        let lo = 1u64;
+        let len = 26usize;
+        let max_n = lo + len as u64 - 1; // 26
+        let sieve_limit = isqrt_u128(2u128 * max_n as u128) as u64 + 1; // 8
+        assert!(
+            sieve_limit < barrier_threshold,
+            "precondition: sieve_limit ({}) must be < barrier_threshold ({})",
+            sieve_limit,
+            barrier_threshold
+        );
+
+        let sieve = PrimeSieve::new(sieve_limit);
+        let batch = ValidateBatch::compute(lo, len, sieve.primes(), barrier_threshold);
+
+        for idx in 0..len {
+            let n = lo + idx as u64;
+            let expected = naive_fails_at_large_prime(n, barrier_threshold, sieve.primes());
+            assert_eq!(
+                batch.fails_at_large_prime[idx], expected,
+                "fails-at-large mismatch: k={}, n={}, barrier={}, sieve_limit={}",
+                k, n, barrier_threshold, sieve_limit
+            );
         }
     }
 }
@@ -652,11 +686,13 @@ impl ValidateBatch {
             }
         }
 
-        // Post-sieve: remaining > 1 means a prime factor > sieve_limit >= sqrt(2n).
-        // Such a prime q satisfies v_q(C(2n,n)) = 0 but v_q(n) >= 1 → governor failure.
-        // Since sieve_limit >> barrier_threshold, this is always a "large prime" failure.
+        // Post-sieve: remaining[i] > 1 means n has a prime factor q > sieve_limit
+        // that was not stripped during the sieve phase.  Such a q implies a governor
+        // failure (v_q(n) >= 1 but v_q(C(2n,n)) = 0 when q > sqrt(2n)).  However,
+        // we must only classify this as a *large-prime* failure when q >= barrier_threshold;
+        // otherwise the residual is a barrier-prime case that stage 2 must handle.
         for i in 0..len {
-            if !fails_large[i] && remaining[i] > 1 {
+            if !fails_large[i] && remaining[i] > 1 && remaining[i] >= barrier_threshold {
                 fails_large[i] = true;
             }
         }
