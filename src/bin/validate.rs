@@ -1,22 +1,32 @@
-//! # Small-Prime Sieve Validator for Erdős Problem 396
+//! # Two-Stage Sieve Validator for Erdős Problem 396
 //!
-//! **Theoretical basis:** Corollary 6 of the Small Prime Barrier Theorem.
+//! **Theoretical basis:** the Large-Prime Barrier Theorem (stage 1) and
+//! Corollary 6 of the Small Prime Barrier Theorem (stage 2).
 //!
 //! This binary implements a provably complete method for finding ALL k-witnesses
-//! in a given range — including any "non-governor witnesses" that the standard
+//! in a given range — including any “non-governor witnesses” that the standard
 //! Governor Set search cannot detect.
 //!
 //! ## How it works
 //!
 //! For every integer `n` in `[start, end)`:
-//!   1. Check the witness condition at each prime `p < 2k+1`:
+//!
+//!   1. **Large-prime governor-failure sieve** *(barrier theorem, contrapositive).*
+//!      For each block term `n-i` (`i = 0..k`), check whether it fails the
+//!      governor condition at any prime `p ≥ 2k+1`. A true witness satisfies the
+//!      divisibility condition at *every* prime, so a failure at any large prime
+//!      rules out witness status. This rejects almost all candidates.
+//!
+//!   2. **Barrier-prime witness screen** *(Corollary 6).*
+//!      Only if every block term passes stage 1, check the witness inequality at
+//!      the barrier primes `p < 2k+1`:
 //!
 //!      ```text
 //!      Σ v_p(n-i) for i=0..k  ≤  v_p(C(2n, n))
 //!      ```
 //!
-//!   2. If ALL barrier primes pass → full p-adic verification (all primes)
-//!   3. Report confirmed witnesses
+//!   3. If ALL barrier primes pass → full p-adic verification (all primes).
+//!      Report confirmed witnesses.
 //!
 //! ## Why this finds all witnesses
 //!
@@ -24,15 +34,17 @@
 //!
 //! `Σ v_p(n-i) (i=0..k) ≤ v_p(C(2n,n))`.
 //!
-//! This program enumerates every `n` in `[start, end)`. It first checks the
-//! inequality for the barrier primes `p < 2k+1` (a necessary condition), then
-//! fully verifies each screen-pass candidate at *all* primes. Therefore the
-//! output contains exactly the witnesses in the range, assuming the arithmetic
-//! kernels are correct.
+//! **Stage 1 (soundness):** The barrier theorem says that if any block term
+//! fails the governor condition at a large prime `q ≥ 2k+1`, then `n` cannot
+//! be a witness. Rejecting such `n` is sound — no witnesses are lost.
 //!
-//! The Lean proof (Small Prime Barrier Theorem / Corollary 6) explains why the
-//! barrier primes are the only place a witness can exhibit “non-governor”
-//! behavior, making this screen effective for ruling out missed witnesses.
+//! **Stage 2 (completeness):** Corollary 6 proves that any non-governor witness
+//! must exhibit governor failures confined to barrier primes `p < 2k+1`.
+//! Screening at those primes therefore catches every possible witness that
+//! survives stage 1.
+//!
+//! Together the two stages ensure the output contains exactly the witnesses in
+//! the range, assuming the arithmetic kernels are correct.
 //!
 //! ## Purpose
 //!
