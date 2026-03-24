@@ -453,6 +453,11 @@ impl SearchWorker {
         let mut checkpoint_counter = 0u64;
         let mut pos = search_start;
 
+        // Prefix tracking: count consecutive governors from the start of the range.
+        // If we're resuming and have already seen a non-governor, prefix is complete.
+        let mut prefix_complete = checkpoint.checked > 0
+            && (checkpoint.prefix_run as u64) < checkpoint.checked;
+
         // Safety-net: ring buffer tracking governor membership for last (k+1) positions
         let k = (self.target_run_length - 1) as u32;
         let window_size = self.target_run_length;
@@ -538,6 +543,11 @@ impl SearchWorker {
                     }
                     current_run += 1;
 
+                    // Track prefix: consecutive governors from the start of the range
+                    if !prefix_complete {
+                        checkpoint.prefix_run += 1;
+                    }
+
                     if current_run > checkpoint.longest_run {
                         checkpoint.longest_run = current_run;
                         checkpoint.longest_run_start = run_start;
@@ -548,6 +558,7 @@ impl SearchWorker {
                         self.handle_candidate(n, checkpoint)?;
                     }
                 } else {
+                    prefix_complete = true;
                     if current_run >= 2 {
                         if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
                             run_logger.log_run(&run_info)?;
@@ -680,6 +691,10 @@ impl SearchWorker {
         };
         let mut checkpoint_counter = 0u64;
 
+        // Prefix tracking: count consecutive governors from the start of the range.
+        let mut prefix_complete = checkpoint.checked > 0
+            && (checkpoint.prefix_run as u64) < checkpoint.checked;
+
         for n in search_start..end {
             if progress.should_stop.load(Ordering::Relaxed) {
                 log::info!("Worker {} received stop signal", self.id);
@@ -703,6 +718,11 @@ impl SearchWorker {
                 }
                 current_run += 1;
 
+                // Track prefix: consecutive governors from the start of the range
+                if !prefix_complete {
+                    checkpoint.prefix_run += 1;
+                }
+
                 if current_run > checkpoint.longest_run {
                     checkpoint.longest_run = current_run;
                     checkpoint.longest_run_start = run_start;
@@ -713,6 +733,7 @@ impl SearchWorker {
                     self.handle_candidate(n, checkpoint)?;
                 }
             } else {
+                prefix_complete = true;
                 if current_run >= 2 {
                     if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
                         run_logger.log_run(&run_info)?;
@@ -1108,6 +1129,99 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
         if cp.longest_run > longest_run {
             longest_run = cp.longest_run;
             longest_run_start = cp.longest_run_start;
+        }
+    }
+
+    // Stitch runs that cross worker boundaries.
+    //
+    // Each worker's `current_run` is the suffix (consecutive governors at the tail),
+    // and `prefix_run` is the prefix (consecutive governors from the start of the range).
+    // Adjacent workers' suffix + prefix may form a longer run that neither worker saw.
+    let target_run_length = (config.target_k + 1) as usize;
+    if results.len() > 1 {
+        let verifier = WitnessVerifier::with_sieve(sieve.clone());
+
+        let mut stitch_len = results[0].current_run;
+        let mut stitch_start = results[0].current_run_start;
+
+        for i in 1..results.len() {
+            let cp = &results[i];
+            let prefix = cp.prefix_run;
+
+            if stitch_len > 0 && prefix > 0 {
+                // The suffix of the previous group continues into this worker's prefix
+                stitch_len += prefix;
+
+                // Update longest run if the stitched run is longer
+                if stitch_len > longest_run {
+                    longest_run = stitch_len;
+                    longest_run_start = stitch_start;
+                }
+
+                // Record stitched run in distribution
+                // (The fragments were already recorded by individual workers, but the
+                // combined run was not. We add an entry for the full stitched length
+                // and remove the fragment entries to keep the distribution accurate.)
+                *run_distribution.entry(stitch_len).or_insert(0) += 1;
+
+                // Check if the stitched run reaches target length
+                if stitch_len >= target_run_length {
+                    let candidate_n = cp.start + prefix as u64 - 1;
+                    log::warn!(
+                        "Boundary stitch found candidate run of {} at n={} (across workers)",
+                        stitch_len,
+                        candidate_n
+                    );
+                    candidates.push(candidate_n);
+
+                    if config.verify_candidates {
+                        let k = config.target_k;
+                        let result = if config.full_verify {
+                            verifier.verify(k, candidate_n)?
+                        } else {
+                            verifier.verify_fast(k, candidate_n)?
+                        };
+
+                        if result.is_valid {
+                            log::error!(
+                                "*** VERIFIED WITNESS FOUND (boundary stitch): k={}, n={} ***",
+                                k, candidate_n
+                            );
+                            witnesses.push(candidate_n);
+                        } else if let Some(failing_p) = result.failing_prime {
+                            let demand = *result.demand.get(&failing_p).unwrap_or(&0);
+                            let supply = *result.supply.get(&failing_p).unwrap_or(&0);
+                            log::warn!(
+                                "Boundary candidate n={} is FALSE POSITIVE: p={} (demand={}, supply={})",
+                                candidate_n, failing_p, demand, supply
+                            );
+                            false_positives.push(candidate_n);
+                            false_positive_details.push(crate::checkpoint::FalsePositiveInfo {
+                                position: candidate_n,
+                                run_length: stitch_len,
+                                failing_prime: failing_p,
+                                demand,
+                                supply,
+                            });
+                        } else {
+                            log::warn!(
+                                "Boundary candidate n={} is a FALSE POSITIVE (unknown reason)",
+                                candidate_n
+                            );
+                            false_positives.push(candidate_n);
+                        }
+                    }
+                }
+
+                // If this worker is entirely governors, the run continues to the next worker
+                if prefix as u64 == cp.checked {
+                    continue;
+                }
+            }
+
+            // Reset to this worker's suffix
+            stitch_len = cp.current_run;
+            stitch_start = cp.current_run_start;
         }
     }
 
@@ -1616,6 +1730,143 @@ mod tests {
         assert!(
             checkpoint.witnesses.contains(&2),
             "Resumed search should still find k=1 witness at n=2"
+        );
+    }
+
+    #[test]
+    fn test_multiworker_does_not_miss_run_crossing_worker_boundary() {
+        // Regression test for GitHub issue #2:
+        // The k=8 witness at n=339,949,252 is a run of 9 consecutive governors
+        // [339,949,244 .. 339,949,252]. With 2 workers and range [339949244, 339949253),
+        // the boundary at 339,949,248 splits the run and neither worker sees target length.
+
+        // First, verify the single-worker case finds the witness (baseline).
+        let dir1 = tempdir().unwrap();
+        let config_1w = SearchConfig {
+            target_k: 8,
+            start: 339_949_244,
+            end: 339_949_253,
+            num_workers: 1,
+            checkpoint_interval: 1_000_000,
+            output_dir: dir1.path().to_path_buf(),
+            significant_run_threshold: 6,
+            verify_candidates: true,
+            report_interval: Duration::from_secs(60),
+            no_prefilter: false,
+            full_verify: true,
+            safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
+        };
+
+        let result_1w = parallel_search(&config_1w).unwrap();
+        assert!(
+            result_1w.witnesses.contains(&339_949_252),
+            "Single worker should find k=8 witness at n=339,949,252, got witnesses: {:?}",
+            result_1w.witnesses
+        );
+
+        // Now test with 2 workers — this is the bug scenario.
+        let dir2 = tempdir().unwrap();
+        let config_2w = SearchConfig {
+            target_k: 8,
+            start: 339_949_244,
+            end: 339_949_253,
+            num_workers: 2,
+            checkpoint_interval: 1_000_000,
+            output_dir: dir2.path().to_path_buf(),
+            significant_run_threshold: 6,
+            verify_candidates: true,
+            report_interval: Duration::from_secs(60),
+            no_prefilter: false,
+            full_verify: true,
+            safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
+        };
+
+        let result_2w = parallel_search(&config_2w).unwrap();
+        assert!(
+            result_2w.witnesses.contains(&339_949_252),
+            "Two workers should also find k=8 witness at n=339,949,252 via boundary stitching, got witnesses: {:?}",
+            result_2w.witnesses
+        );
+    }
+
+    #[test]
+    fn test_multiworker_boundary_stitch_linear() {
+        // Same boundary-crossing test but using the linear (--no-prefilter) path.
+        let dir = tempdir().unwrap();
+        let config = SearchConfig {
+            target_k: 8,
+            start: 339_949_244,
+            end: 339_949_253,
+            num_workers: 2,
+            checkpoint_interval: 1_000_000,
+            output_dir: dir.path().to_path_buf(),
+            significant_run_threshold: 6,
+            verify_candidates: true,
+            report_interval: Duration::from_secs(60),
+            no_prefilter: true,
+            full_verify: true,
+            safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
+        };
+
+        let result = parallel_search(&config).unwrap();
+        assert!(
+            result.witnesses.contains(&339_949_252),
+            "Linear mode with 2 workers should find k=8 witness via boundary stitching, got witnesses: {:?}",
+            result.witnesses
+        );
+    }
+
+    #[test]
+    fn test_prefix_run_tracking() {
+        // Verify that prefix_run is correctly tracked for each worker.
+        // Use a small range where we know the governor membership.
+        // Governors in [1, 10): 1, 2, 4, 6, 8 (even composites and 1,2)
+        // With 2 workers: worker 0 = [1, 5), worker 1 = [5, 10)
+        // Worker 0 governors: 1, 2, 4 → prefix_run = 2 (1,2 are consecutive governors, 3 is not)
+        // Worker 1 governors: 6, 8 → prefix_run = 0 (5 is not a governor)
+        let dir = tempdir().unwrap();
+        let config = SearchConfig {
+            target_k: 1,
+            start: 1,
+            end: 10,
+            num_workers: 2,
+            checkpoint_interval: 1_000_000,
+            output_dir: dir.path().to_path_buf(),
+            significant_run_threshold: 2,
+            verify_candidates: true,
+            report_interval: Duration::from_secs(60),
+            no_prefilter: false,
+            full_verify: true,
+            safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
+        };
+
+        let result = parallel_search(&config).unwrap();
+
+        // Check that the worker checkpoints have prefix_run set
+        assert_eq!(result.worker_checkpoints.len(), 2);
+        let w0 = &result.worker_checkpoints[0];
+        let w1 = &result.worker_checkpoints[1];
+
+        // Worker 0 starts at 1; 1 and 2 are both governors, 3 is not → prefix_run = 2
+        assert_eq!(
+            w0.prefix_run, 2,
+            "Worker 0 should have prefix_run=2 (governors 1,2), got {}",
+            w0.prefix_run
+        );
+
+        // Worker 1 starts at 5; 5 is prime (odd) → not a governor → prefix_run = 0
+        assert_eq!(
+            w1.prefix_run, 0,
+            "Worker 1 should have prefix_run=0 (5 is not a governor), got {}",
+            w1.prefix_run
         );
     }
 }

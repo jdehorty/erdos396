@@ -82,6 +82,14 @@ pub struct Checkpoint {
     #[serde(default)]
     pub current_run_start: u64,
 
+    /// Length of the consecutive-Governor prefix starting at `start`.
+    ///
+    /// This counts how many consecutive governors appear from the very beginning
+    /// of the worker's range. Used by the aggregation pass to stitch runs that
+    /// cross worker boundaries.
+    #[serde(default)]
+    pub prefix_run: usize,
+
     /// Number of integers checked so far
     pub checked: u64,
 
@@ -219,6 +227,7 @@ impl Checkpoint {
             current_pos: start,
             current_run: 0,
             current_run_start: start,
+            prefix_run: 0,
             checked: 0,
             sum_checked: 0,
             xor_checked: 0,
