@@ -20,15 +20,15 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build --release
-      - run: python3 -m py_compile scripts/check_validate_report.py scripts/check_search_report.py scripts/verify_witness.py
+      - run: python3 -m py_compile certificates/scripts/check_validate_report.py certificates/scripts/check_search_report.py certificates/scripts/verify_witness.py
       - name: Smoke (erdos396 report)
         run: |
           cargo run --bin erdos396 -- --start 1 --end 1000 -k 1 --workers 1 -o checkpoints_ci_smoke --checkpoint-interval 500
-          python3 scripts/check_search_report.py checkpoints_ci_smoke/search_report_k1_1_1000.json
+          python3 certificates/scripts/check_search_report.py checkpoints_ci_smoke/search_report_k1_1_1000.json
       - name: Smoke (validate report)
         run: |
           cargo run --bin validate -- -k 1 --start 0 --end 1000 --workers 1 -o validate_ci_smoke --checkpoint-interval 500 --report-interval 1
-          python3 scripts/check_validate_report.py validate_ci_smoke/validate_report_k1_0_1000.json
+          python3 certificates/scripts/check_validate_report.py validate_ci_smoke/validate_report_k1_0_1000.json
 
   lean:
     name: Lean (lake build)

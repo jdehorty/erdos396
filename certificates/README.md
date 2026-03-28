@@ -13,7 +13,7 @@ For each certified `k`, the bundle includes:
   SHA-256, exact command line, and the host actually used for that partition
 - `SHA256SUMS` for every file in this directory
 - one `validate_k*_partition_check.txt` per certified `k`, produced by
-  `scripts/check_validate_report.py --check-partition`
+  `certificates/scripts/check_validate_report.py --check-partition`
 - `validate_k9_witness_1019547844_check.txt`, an independent stdlib-only
   verification of the corrected `k=9` witness found by `validate`
 
@@ -99,7 +99,7 @@ Correction note:
 - the first partition report records the corrected witness directly in its
   `witnesses` list
 - `validate_k9_witness_1019547844_check.txt` independently rechecks the corrected
-  witness with `scripts/verify_witness.py`
+  witness with `certificates/scripts/verify_witness.py`
 
 ### `k=10`
 
@@ -255,34 +255,34 @@ Run:
 ```bash
 sha256sum -c certificates/validate/SHA256SUMS
 
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k8_0_169974626.json \
   certificates/validate/validate_report_k8_169974626_339949252.json \
   --check-partition
 
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k9_0_8804882496.json \
   certificates/validate/validate_report_k9_8804882496_17609764993.json \
   --check-partition
 
-python3 scripts/verify_witness.py -k 9 -n 1019547844
+python3 certificates/scripts/verify_witness.py -k 9 -n 1019547844
 
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k10_0_8804882497.json \
   certificates/validate/validate_report_k10_8804882497_17609764994.json \
   --check-partition
 
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k11_0_610796592505.json \
   certificates/validate/validate_report_k11_610796592505_1070858041585.json \
   --check-partition
 
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k12_0_2880387737783.json \
   certificates/validate/validate_report_k12_2880387737783_5048891644646.json \
   --check-partition
 
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k13_0_9684496742351.json \
   certificates/validate/validate_report_k13_9684496742351_18253129921842.json \
   --check-partition

@@ -100,14 +100,14 @@ For an *independent* check of those invariants (separate implementation, stdlib-
 run:
 
 ```bash
-python3 scripts/check_validate_report.py validate_checkpoints/validate_report_k13_0_18253129921842.json
+python3 certificates/scripts/check_validate_report.py validate_checkpoints/validate_report_k13_0_18253129921842.json
 ```
 
 If you run `validate` in multiple contiguous chunks, you can also verify that the
 reports form a gap-free partition of the scanned range:
 
 ```bash
-python3 scripts/check_validate_report.py --check-partition validate_checkpoints/validate_report_k13_*.json
+python3 certificates/scripts/check_validate_report.py --check-partition validate_checkpoints/validate_report_k13_*.json
 ```
 
 For additional runtime confidence on a given machine, enable
