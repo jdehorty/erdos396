@@ -1,19 +1,20 @@
 # search-lab
 
-A minimal, bare-bones implementation of the Erdos Problem #396 witness search,
-focused on maximum throughput with zero unnecessary abstractions.
+An experimental workspace providing a common ground for comparing search
+algorithm optimizations across languages and implementations. Each approach
+runs against the same standardized benchmarks (k=8, k=9, k=10 over the known
+witness ranges), making it straightforward to determine what actually improves
+throughput and what does not.
 
-This crate serves as a lightweight testing ground for search algorithm
-improvements. New optimization ideas — modular-inverse exact division,
-const-generic Kummer kernels, cache-resident blocking strategies, etc. — are
-prototyped and benchmarked here before being integrated into the main `erdos396`
-crate.
+Optimizations are prototyped and measured here before being integrated into the
+main `erdos396` crate.
 
 ## Structure
 
 ```
 search-lab/
 ├── justfile            Build, benchmark, and clean recipes
+├── bench-rust.md       Baseline Rust benchmark results
 ├── src/main.rs         Rust implementation
 └── cpp-reference/
     ├── main.cpp                  C++ port
