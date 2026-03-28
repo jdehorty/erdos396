@@ -1,12 +1,18 @@
 cxx := env("CXX", "g++")
 cxxflags := "-std=c++20 -O3 -march=native -mtune=native -flto -funroll-loops -fomit-frame-pointer -fno-exceptions -fno-rtti -DNDEBUG -pthread -Wall -Wextra -Wpedantic"
 ldflags := "-flto -pthread"
-target := "erdos396_search_lab"
 
-# Build the C++ search binary
+# Build the C++ port
 build:
-    {{cxx}} {{cxxflags}} -o {{target}} main.cpp {{ldflags}}
+    {{cxx}} {{cxxflags}} -o erdos396_port main.cpp {{ldflags}}
+
+# Build Sharvil's original reference implementation
+build-ref:
+    {{cxx}} {{cxxflags}} -o erdos396_ref erdos_problem_396.cpp {{ldflags}}
+
+# Build both C++ binaries
+build-all: build build-ref
 
 # Remove build artifacts
 clean:
-    rm -f {{target}}
+    rm -f erdos396_port erdos396_ref

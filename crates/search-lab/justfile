@@ -9,17 +9,16 @@ threads := `python3 -c "import os; print(os.cpu_count() or 4)"`
 build-rust:
     cargo build -p erdos396-search-lab --release
 
-# Build the C++ binary
+# Build both C++ binaries (port + reference)
 build-cpp:
-    cd cpp-reference && just build
+    cd cpp-reference && just build-all
 
-# Build both
+# Build everything
 build: build-rust build-cpp
 
-# ─── Benchmark ────────────────────────────────────────────────────────
+# ─── Shared benchmark helpers ─────────────────────────────────────────
 #
-# Runs k=8, k=9, k=10 over the known witness ranges.
-# These match the ranges the C++ reference implementation traverses:
+# All benchmarks run k=8, k=9, k=10 over the known witness ranges:
 #   k=8:  [1, 339_949_253)                witness at 339_949_252
 #   k=9:  [339_949_252, 1_019_547_845)    witness at 1_019_547_844
 #   k=10: [1_019_547_844, 17_609_764_995) witness at 17_609_764_994
@@ -48,7 +47,6 @@ bench-rust: build-rust
     git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     timestamp=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
-    # ── Write markdown ──
     {
         echo "# search-lab Benchmark (Rust)"
         echo ""
@@ -75,7 +73,6 @@ bench-rust: build-rust
         echo "|--:|:------|-----------:|---------:|-----------------:|"
     } | tee "$OUT"
 
-    # ── Run benchmarks ──
     bench() {
         local k=$1 start=$2 end=$3
         local range=$(( end - start ))
@@ -100,19 +97,16 @@ bench-rust: build-rust
 
     echo "" | tee -a "$OUT"
     echo "Results written to: $OUT" >&2
-
-    # Clean up artifacts the binary drops in cwd
     rm -f results.txt checkpoint.txt checkpoint.tmp 2>/dev/null || true
 
-# Benchmark C++ implementation
-bench-cpp: build-cpp
+# Benchmark C++ port (main.cpp)
+bench-cpp-port: build-cpp
     #!/usr/bin/env bash
     set -euo pipefail
-    BIN="cpp-reference/erdos396_search_lab"
+    BIN="cpp-reference/erdos396_port"
     THREADS="{{threads}}"
-    OUT="bench-cpp.md"
+    OUT="bench-cpp-port.md"
 
-    # ── System info ──
     if [[ "$(uname)" == "Darwin" ]]; then
         cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
         mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
@@ -128,9 +122,8 @@ bench-cpp: build-cpp
     git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     timestamp=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
-    # ── Write markdown ──
     {
-        echo "# search-lab Benchmark (C++)"
+        echo "# search-lab Benchmark (C++ port)"
         echo ""
         echo "Measures wall-clock throughput of the witness search over the known"
         echo "witness ranges for k=8, k=9, and k=10. These ranges reproduce the"
@@ -155,14 +148,15 @@ bench-cpp: build-cpp
         echo "|--:|:------|-----------:|---------:|-----------------:|"
     } | tee "$OUT"
 
-    # ── Run benchmarks ──
     bench() {
         local k=$1 start=$2 end=$3
         local range=$(( end - start ))
         printf "  k=%-4s  %-36s" "$k" "[$start, $end)" >&2
         local t0
         t0=$(python3 -c 'import time; print(time.time())')
-        "$BIN" -k "$k" --kmax "$k" --start "$start" --end "$end" \
+        # C++ port has no --end flag; it searches from --start until it finds
+        # the witness. The range searched matches [start, witness].
+        "$BIN" -k "$k" --kmax "$k" --start "$start" \
             --threads "$THREADS" > /dev/null 2>&1 || true
         local t1
         t1=$(python3 -c 'import time; print(time.time())')
@@ -180,12 +174,103 @@ bench-cpp: build-cpp
 
     echo "" | tee -a "$OUT"
     echo "Results written to: $OUT" >&2
-
-    # Clean up artifacts the binary drops in cwd
     rm -f results.txt checkpoint.txt checkpoint.tmp 2>/dev/null || true
 
-# Benchmark both implementations side by side
-bench: bench-rust bench-cpp
+# Benchmark Sharvil's C++ reference implementation (erdos_problem_396.cpp)
+bench-cpp-ref: build-cpp
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BIN="cpp-reference/erdos396_ref"
+    THREADS="{{threads}}"
+    OUT="bench-cpp-ref.md"
+
+    if [[ "$(uname)" == "Darwin" ]]; then
+        cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
+        mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+        mem="$(( mem_bytes / 1073741824 )) GB"
+        os_info="$(sw_vers -productName 2>/dev/null || echo macOS) $(sw_vers -productVersion 2>/dev/null || echo "")"
+    else
+        cpu=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "unknown")
+        mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+        mem="$(( mem_kb / 1048576 )) GB"
+        os_info=$(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"' || echo "Linux")
+    fi
+    cxx_ver=$(${CXX:-g++} --version 2>/dev/null | head -1 || echo "unknown")
+    git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    timestamp=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+    # Sharvil's binary has no CLI flags. It reads checkpoint-396.txt to
+    # determine where to resume. We seed it at k=8, start=1 so it naturally
+    # traverses the same ranges: k=8 [1..], k=9 [339M..], k=10 [1019M..].
+    # The binary reports its own per-k timing, which we parse.
+    # Note: thread count is hardcoded to hardware_concurrency() in the binary.
+    hw_threads=$(python3 -c "import os; print(os.cpu_count() or '?')")
+
+    {
+        echo "# search-lab Benchmark (C++ reference, Sharvil Kesarwani)"
+        echo ""
+        echo "Measures wall-clock throughput of the witness search over the known"
+        echo "witness ranges for k=8, k=9, and k=10. These ranges reproduce the"
+        echo "same search space traversed by the C++ reference implementation,"
+        echo "providing a standardized baseline for comparing optimizations."
+        echo ""
+        echo "## Environment"
+        echo ""
+        echo "| | |"
+        echo "|---|---|"
+        echo "| **CPU** | $cpu |"
+        echo "| **Memory** | $mem |"
+        echo "| **OS** | $os_info |"
+        echo "| **Threads** | $hw_threads (hardcoded to hardware_concurrency) |"
+        echo "| **C++** | \`$cxx_ver\` |"
+        echo "| **Commit** | \`$git_hash\` |"
+        echo "| **Date** | $timestamp |"
+        echo ""
+        echo "## Results"
+        echo ""
+        echo "| k | Range | Candidates | Time (s) | Throughput (M/s) |"
+        echo "|--:|:------|-----------:|---------:|-----------------:|"
+    } | tee "$OUT"
+
+    # Seed checkpoint so it starts at k=8 from position 1
+    echo "8 1" > cpp-reference/checkpoint-396.txt
+
+    # Known ranges for table formatting
+    declare -A STARTS=([8]=1 [9]=339949252 [10]=1019547844)
+    declare -A ENDS=([8]=339949253 [9]=1019547845 [10]=17609764995)
+
+    echo "  Running k=8,9,10 (seeded via checkpoint)..." >&2
+
+    # Run binary, capture output. Use timeout to stop after k=10 completes.
+    cd cpp-reference
+    output=$(timeout 600 ./erdos396_ref 2>&1 || true)
+    cd ..
+
+    # Parse per-k result lines:
+    #   k =  8 | min n =      339949252 | Time:       1.2345 s | Speed:   275.21 M candidates/s
+    echo "$output" | grep "^k = " | while IFS='|' read -r k_field n_field time_field speed_field; do
+        k=$(echo "$k_field" | tr -dc '0-9')
+        elapsed=$(echo "$time_field" | grep -oE '[0-9]+\.[0-9]+')
+        speed=$(echo "$speed_field" | grep -oE '[0-9]+\.[0-9]+')
+
+        start=${STARTS[$k]:-"?"}
+        end=${ENDS[$k]:-"?"}
+        range=$(( end - start ))
+        range_fmt=$(python3 -c "print(f'{$range:,}')")
+
+        printf "  k=%-4s  %-36s  %ss  %s M/s\n" "$k" "[$start, $end)" "$elapsed" "$speed" >&2
+        echo "| $k | \`[$start, $end)\` | $range_fmt | $elapsed | $speed |" | tee -a "$OUT"
+    done
+
+    echo "" | tee -a "$OUT"
+    echo "Results written to: $OUT" >&2
+
+    # Clean up
+    rm -f cpp-reference/checkpoint-396.txt cpp-reference/checkpoint-396.tmp \
+          cpp-reference/results-396.txt 2>/dev/null || true
+
+# Benchmark all three implementations
+bench: bench-rust bench-cpp-port bench-cpp-ref
 
 # ─── Clean ────────────────────────────────────────────────────────────
 
