@@ -13,9 +13,10 @@ crate.
 
 ```
 search-lab/
-├── src/main.rs     Rust implementation (cargo build --release)
+├── justfile            Build, benchmark, and clean recipes
+├── src/main.rs         Rust implementation
 └── cpp-reference/
-    ├── main.cpp                  C++ port (just build)
+    ├── main.cpp                  C++ port
     ├── erdos_problem_396.cpp     Reference implementation by Sharvil Kesarwani
     ├── justfile
     └── README.md                 C++ source attribution and notes
@@ -23,14 +24,24 @@ search-lab/
 
 ## Building
 
-**Rust:**
 ```sh
-cargo build -p erdos396-search-lab --release
+just build        # both Rust and C++
+just build-rust   # Rust only
+just build-cpp    # C++ only
 ```
 
-**C++:**
+## Benchmarking
+
+Benchmarks run k=8, k=9, k=10 over the known witness ranges (matching what the
+C++ reference implementation traverses):
+
 ```sh
-cd cpp-reference && just build
+just bench        # both implementations side by side
+just bench-rust   # Rust only
+just bench-cpp    # C++ only
+
+# Override thread count
+just threads=8 bench
 ```
 
 ## Usage
