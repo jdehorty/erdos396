@@ -1,0 +1,12 @@
+cxx := env("CXX", "g++")
+cxxflags := "-std=c++20 -O3 -march=native -mtune=native -flto -funroll-loops -fomit-frame-pointer -fno-exceptions -fno-rtti -DNDEBUG -pthread -Wall -Wextra -Wpedantic"
+ldflags := "-flto -pthread"
+target := "erdos396_search_lab"
+
+# Build the C++ search binary
+build:
+    {{cxx}} {{cxxflags}} -o {{target}} main.cpp {{ldflags}}
+
+# Remove build artifacts
+clean:
+    rm -f {{target}}
