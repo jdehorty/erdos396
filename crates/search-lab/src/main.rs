@@ -502,7 +502,8 @@ fn solve(
                         break;
                     }
 
-                    let r_chunk = l_chunk + CHUNK_SIZE + k - 1;
+                    let effective_chunk = CHUNK_SIZE.min(end_l - l_chunk);
+                    let r_chunk = l_chunk + effective_chunk + k - 1;
                     let chunk_w = (r_chunk - l_chunk + 1) as u32;
 
                     let max_p = isqrt_u64(r_chunk.saturating_mul(2)).max(two_k) + 1;
