@@ -862,6 +862,7 @@ pub fn solve_ranges<H: SolverHooks>(
     bench_secs: f64,
     progress: bool,
     hooks: &H,
+    output_dir: &std::path::Path,
 ) -> SolveResult {
     let k32 = k as u32;
     let two_k = 2 * k;
@@ -1187,6 +1188,26 @@ pub fn solve_ranges<H: SolverHooks>(
                     hooks.on_chunk_done(worker_id, l_chunk, l_chunk + effective_chunk);
                     total_chunks_done.fetch_add(1, Relaxed);
                     chunk_start += effective_chunk;
+
+                    // Per-worker checkpoint every ~100M candidates
+                    let worker_chunks = (chunk_start - w_start) / CHUNK_SIZE;
+                    if worker_chunks % 100 == 0 || chunk_start >= w_end {
+                        let cp = serde_json::json!({
+                            "target_k": k,
+                            "start": wr.start,
+                            "end": wr.end,
+                            "current_pos": chunk_start,
+                            "checked": chunk_start - w_start,
+                            "worker_id": wr.worker_id,
+                            "version": 4,
+                        });
+                        if let Ok(json) = serde_json::to_string_pretty(&cp) {
+                            let path = output_dir.join(format!("checkpoint_k{}_w{:02}.json", k, wr.worker_id));
+                            let tmp = path.with_extension("tmp");
+                            let _ = std::fs::write(&tmp, &json);
+                            let _ = std::fs::rename(&tmp, &path);
+                        }
+                    }
                 }
             });
         }

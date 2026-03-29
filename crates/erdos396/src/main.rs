@@ -739,6 +739,7 @@ fn main() -> anyhow::Result<()> {
         0.0,
         true, // progress
         &hooks,
+        &config.output_dir,
     );
 
     let sec = result.duration.as_secs_f64();
