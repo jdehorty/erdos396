@@ -378,6 +378,7 @@ fn main() -> anyhow::Result<()> {
         safety_net: cli.safety_net,
         fused_self_check_samples: cli.fused_self_check_samples,
         fused_audit_interval: cli.fused_audit_interval,
+        bench_secs: 0.0,
     };
 
     // Print configuration

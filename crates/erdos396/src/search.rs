@@ -123,6 +123,14 @@ pub struct SearchConfig {
     /// Every `fused_audit_interval` checked values per worker, validate that the
     /// fused sieve membership agrees with the direct governor test at a sampled `n`.
     pub fused_audit_interval: u64,
+
+    /// Benchmark mode duration in seconds (0.0 = disabled).
+    ///
+    /// When > 0, the search processes the entire [start, end) range without
+    /// file I/O (no checkpoints, run logs, or search report). A background
+    /// timer sets `should_stop` after this many seconds as a safety valve,
+    /// but the `--end` bound normally terminates the search first.
+    pub bench_secs: f64,
 }
 
 impl Default for SearchConfig {
@@ -142,6 +150,7 @@ impl Default for SearchConfig {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         }
     }
 }
@@ -1540,6 +1549,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -1576,6 +1586,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -1606,6 +1617,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let config_linear = SearchConfig {
@@ -1652,6 +1664,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let config_full = SearchConfig {
@@ -1692,6 +1705,7 @@ mod tests {
             safety_net: true,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -1726,6 +1740,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let _result = parallel_search(&config).unwrap();
@@ -1835,6 +1850,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
         parallel_search(&config).unwrap()
     }
@@ -1914,6 +1930,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -2064,6 +2081,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let config_1w = base.clone();
@@ -2112,6 +2130,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let _ = parallel_search(&config).unwrap();
