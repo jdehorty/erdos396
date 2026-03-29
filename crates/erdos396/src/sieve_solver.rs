@@ -165,6 +165,126 @@ macro_rules! dispatch_strip {
 // ---------------------------------------------------------------------------
 // Exact check — cold path, called only on rare candidate witnesses
 // ---------------------------------------------------------------------------
+/// Detail about why a candidate failed exact_check.
+#[derive(Debug, Clone)]
+pub struct FalsePositiveDetail {
+    /// The prime p where v_p(product) > v_p(C(2n,n))
+    pub failing_prime: u64,
+    /// v_p in the product n(n-1)...(n-k)
+    pub demand: u64,
+    /// v_p in C(2n,n)
+    pub supply: u64,
+    /// Which part of the check failed (1=v_2, 2=Legendre, 3=large prime)
+    pub part: u8,
+}
+
+/// Cold-path exact check returning failure detail on false positive.
+#[cold]
+#[inline(never)]
+fn exact_check_detailed(
+    n: u64,
+    k: u64,
+    prime_data: &[PrimeData],
+) -> Result<(), FalsePositiveDetail> {
+    let two_k = 2 * k;
+    let two_n = 2 * n;
+
+    // Part 1: v_2 check
+    let n_ones = n.count_ones() as u64;
+    let nu2_prod = ((n - k - 1).count_ones() as u64)
+        .wrapping_sub(n_ones)
+        .wrapping_add(k + 1);
+    if n_ones < nu2_prod {
+        return Err(FalsePositiveDetail {
+            failing_prime: 2,
+            demand: nu2_prod,
+            supply: n_ones,
+            part: 1,
+        });
+    }
+
+    // Part 2: Legendre formula for primes p in (2, 2k]
+    let nk1 = n - k - 1;
+    for pd in prime_data {
+        let p = pd.p as u64;
+        if p == 2 { continue; }
+        if p > two_k { break; }
+        let (mut nu_prod, mut nu_comb, mut pw) = (0u64, 0u64, p);
+        loop {
+            let vn = n / pw;
+            nu_prod += vn - nk1 / pw;
+            nu_comb += two_n / pw - (vn << 1);
+            if pw > two_n / p { break; }
+            pw *= p;
+        }
+        if nu_prod > nu_comb {
+            return Err(FalsePositiveDetail {
+                failing_prime: p,
+                demand: nu_prod,
+                supply: nu_comb,
+                part: 2,
+            });
+        }
+    }
+
+    // Part 3: Per-element large prime check
+    for i in 0..=k {
+        let ni = n - i;
+        let mut temp = ni;
+        temp >>= temp.trailing_zeros();
+
+        for pd in prime_data {
+            let p = pd.p as u64;
+            if p == 2 { continue; }
+
+            if p <= two_k {
+                let mut q = temp.wrapping_mul(pd.inv_p);
+                while q <= pd.max_quot { temp = q; q = temp.wrapping_mul(pd.inv_p); }
+                continue;
+            }
+
+            if p * p > temp {
+                if temp > two_k {
+                    let p_val = temp;
+                    let mut nu_prod = 1u64;
+                    let mut t2 = ni / p_val;
+                    while t2 > 0 && t2 % p_val == 0 { nu_prod += 1; t2 /= p_val; }
+                    let mut nu_comb = 0u64;
+                    let mut power = p_val;
+                    loop {
+                        nu_comb += two_n / power - 2 * (n / power);
+                        if power > two_n / p_val { break; }
+                        power *= p_val;
+                    }
+                    if nu_prod > nu_comb {
+                        return Err(FalsePositiveDetail {
+                            failing_prime: p_val, demand: nu_prod, supply: nu_comb, part: 3,
+                        });
+                    }
+                }
+                break;
+            }
+
+            let q = temp.wrapping_mul(pd.inv_p);
+            if q <= pd.max_quot {
+                let mut nu_prod = 0u64;
+                let mut q2 = q;
+                loop { nu_prod += 1; temp = q2; q2 = temp.wrapping_mul(pd.inv_p); if q2 > pd.max_quot { break; } }
+                let mut nu_comb = 0u64;
+                let mut power = p;
+                loop { nu_comb += two_n / power - 2 * (n / power); if power > two_n / p { break; } power *= p; }
+                if nu_prod > nu_comb {
+                    return Err(FalsePositiveDetail {
+                        failing_prime: p, demand: nu_prod, supply: nu_comb, part: 3,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cold]
 #[inline(never)]
 fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
@@ -300,18 +420,19 @@ fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
 /// Methods are called from worker threads and must be `Send + Sync`.
 pub trait SolverHooks: Send + Sync {
     /// A verified witness was found: `n(n-1)...(n-k) | C(2n,n)`.
-    fn on_witness(&self, _n: u64, _k: u64) {}
+    fn on_witness(&self, _worker_id: u32, _n: u64, _k: u64) {}
 
-    /// A candidate (smooth run of k+1) was checked but failed exact verification.
-    fn on_false_positive(&self, _n: u64, _k: u64) {}
+    /// A candidate (smooth run of k+1) failed exact verification.
+    /// Includes per-prime detail: which prime failed, demand vs supply.
+    fn on_false_positive(&self, _worker_id: u32, _n: u64, _k: u64, _detail: &FalsePositiveDetail) {}
 
     /// A worker finished processing a chunk covering `[chunk_start, chunk_end)`.
     /// Called once per chunk per worker. Useful for checkpointing and progress.
-    fn on_chunk_done(&self, _chunk_start: u64, _chunk_end: u64) {}
+    fn on_chunk_done(&self, _worker_id: u32, _chunk_start: u64, _chunk_end: u64) {}
 
     /// A run of `length` consecutive smooth numbers was found starting at `start`.
     /// Only called when [`track_runs`](SolverHooks::track_runs) returns true.
-    fn on_run(&self, _start: u64, _length: usize) {}
+    fn on_run(&self, _worker_id: u32, _start: u64, _length: usize) {}
 
     /// Whether to track all runs (adds a per-chunk linear scan, ~20% overhead).
     /// Returns false by default (bench mode). Override to true for normal mode.
@@ -416,8 +537,14 @@ pub fn solve<H: SolverHooks>(
             });
         }
 
-        for _ in 0..n_threads {
-            s.spawn(|| {
+        for thread_idx in 0..n_threads {
+            // Shadow all shared refs before `move` so only the u32 is moved
+            let current_chunk = &current_chunk;
+            let global_min_n = &global_min_n;
+            let witness_count = &witness_count;
+            let time_up = &time_up;
+            s.spawn(move || {
+                let worker_id = thread_idx;
                 let buf_size = BLOCK_SIZE as usize + k as usize + 1;
                 let mut rem = vec![0u64; buf_size];
                 let mut prime_offsets: Vec<u32> = Vec::new();
@@ -603,20 +730,25 @@ pub fn solve<H: SolverHooks>(
                                     block_l - overlap as u64 + scan_j as u64 + k;
                                 if cand_n > k {
                                     let dominated = !bench_mode && cand_n >= global_min_n.load(Relaxed);
-                                    if !dominated && exact_check(cand_n, k, &prime_data[..chunk_total_primes]) {
-                                        witness_count.fetch_add(1, Relaxed);
-                                        hooks.on_witness(cand_n, k);
-                                        let mut current = global_min_n.load(Relaxed);
-                                        while cand_n < current {
-                                            match global_min_n.compare_exchange_weak(
-                                                current, cand_n, Relaxed, Relaxed,
-                                            ) {
-                                                Ok(_) => break,
-                                                Err(c) => current = c,
+                                    if !dominated {
+                                        match exact_check_detailed(cand_n, k, &prime_data[..chunk_total_primes]) {
+                                            Ok(()) => {
+                                                witness_count.fetch_add(1, Relaxed);
+                                                hooks.on_witness(worker_id, cand_n, k);
+                                                let mut current = global_min_n.load(Relaxed);
+                                                while cand_n < current {
+                                                    match global_min_n.compare_exchange_weak(
+                                                        current, cand_n, Relaxed, Relaxed,
+                                                    ) {
+                                                        Ok(_) => break,
+                                                        Err(c) => current = c,
+                                                    }
+                                                }
+                                            }
+                                            Err(detail) => {
+                                                hooks.on_false_positive(worker_id, cand_n, k, &detail);
                                             }
                                         }
-                                    } else if !dominated {
-                                        hooks.on_false_positive(cand_n, k);
                                     }
                                 }
                                 scan_j += 1;
@@ -666,18 +798,18 @@ pub fn solve<H: SolverHooks>(
                                 run_len += 1;
                             } else {
                                 if run_len >= min_run {
-                                    hooks.on_run(run_start, run_len);
+                                    hooks.on_run(worker_id, run_start, run_len);
                                 }
                                 run_len = 0;
                             }
                         }
                         if run_len >= min_run {
-                            hooks.on_run(run_start, run_len);
+                            hooks.on_run(worker_id, run_start, run_len);
                         }
                     }
 
                     // Notify hooks that this chunk is done
-                    hooks.on_chunk_done(l_chunk, l_chunk + effective_chunk);
+                    hooks.on_chunk_done(worker_id, l_chunk, l_chunk + effective_chunk);
                 }
             });
         }
