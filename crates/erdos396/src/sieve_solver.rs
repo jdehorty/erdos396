@@ -432,6 +432,7 @@ pub fn solve<H: SolverHooks>(
     bench_secs: f64,
     progress: bool,
     hooks: &H,
+    resume_chunks: u64,
 ) -> SolveResult {
     let k32 = k as u32;
     let two_k = 2 * k;
@@ -439,7 +440,7 @@ pub fn solve<H: SolverHooks>(
     let bench_mode = bench_secs > 0.0;
 
     let global_min_n = AtomicU64::new(u64::MAX);
-    let current_chunk = AtomicU64::new(0);
+    let current_chunk = AtomicU64::new(resume_chunks);
     let witness_count = AtomicU64::new(0);
     let time_up = AtomicBool::new(false);
 

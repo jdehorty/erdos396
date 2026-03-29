@@ -619,6 +619,42 @@ fn main() -> anyhow::Result<()> {
         t0.elapsed().as_secs_f64()
     );
 
+
+    // Compute resume point from existing per-worker checkpoint files
+    let resume_chunks: u64 = {
+        let mut min_pos: u64 = config.start;
+        let mut found_any = false;
+        for w in 0..config.num_workers {
+            let cp_path = config.output_dir.join(format!(
+                "checkpoint_k{}_w{:02}.json",
+                config.target_k, w
+            ));
+            if cp_path.exists() {
+                if let Ok(data) = std::fs::read_to_string(&cp_path) {
+                    if let Ok(cp) = serde_json::from_str::<serde_json::Value>(&data) {
+                        if let Some(pos) = cp.get("current_pos").and_then(|v| v.as_u64()) {
+                            if !found_any || pos < min_pos {
+                                min_pos = pos;
+                            }
+                            found_any = true;
+                        }
+                    }
+                }
+            }
+        }
+        if found_any && min_pos > config.start {
+            let skip = min_pos - config.start;
+            let chunks = skip / 1_048_576;
+            eprintln!(
+                "# Resuming: min_pos={} ({:.3}T), skipping {} chunks ({:.2}T)",
+                min_pos, min_pos as f64 / 1e12, chunks, (chunks * 1_048_576) as f64 / 1e12
+            );
+            chunks
+        } else {
+            0u64
+        }
+    };
+
     if bench_mode {
         // Bench mode: NoOpHooks for zero overhead
         let result = erdos396::sieve_solver::solve(
@@ -630,6 +666,7 @@ fn main() -> anyhow::Result<()> {
             config.bench_secs,
             false,
             &NoOpHooks,
+            0, // no resume in bench mode
         );
 
         let sec = result.duration.as_secs_f64();
@@ -659,6 +696,7 @@ fn main() -> anyhow::Result<()> {
         0.0,
         true, // progress
         &hooks,
+        resume_chunks,
     );
 
     let sec = result.duration.as_secs_f64();
