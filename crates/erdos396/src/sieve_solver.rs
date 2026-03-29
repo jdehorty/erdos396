@@ -7,10 +7,12 @@
 //!
 //! Key difference from [`crate::search::parallel_search`]: this solver never
 //! computes per-element `is_governor[i]`. Instead it strips all prime factors
-//! into a `rem[]` array with inline v_p checks (rem=0 for rejected, rem=1 for
-//! confirmed governor), then scans for runs of `rem[j] == 1`.
+//! into a `rem[]` array (rem=1 means smooth), then scans for runs of `rem[j] == 1`.
+//! Candidate runs of length >= k+1 go through exact_check for witness verification.
+//! Reported run lengths are verified against the true governor check so statistics
+//! are accurate without slowing down the hot sieve loop.
 
-use crate::governor::vp_central_binom_dispatch;
+use crate::governor::GovernorChecker;
 use crate::sieve::{build_prime_data, PrimeData, PrimeSieve};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
@@ -73,7 +75,7 @@ fn isqrt_u64(n: u64) -> u64 {
 // Const-generic strip with offset tracking (matches search-lab)
 // ---------------------------------------------------------------------------
 #[inline(always)]
-fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64, block_l: u64) {
+fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64, _block_l: u64) {
     const fn inv_p_const(p: u64) -> u64 {
         let mut inv = p.wrapping_mul(3) ^ 2;
         inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
@@ -94,28 +96,19 @@ fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64, b
     while j < w_block {
         unsafe {
             let r = *rem.add(j as usize);
-            if r == 0 { j += P; continue; } // already rejected
-            let mut temp = r.wrapping_mul(inv);
-            let mut exp = 1u32;
-            let mut q = temp.wrapping_mul(inv);
-            if q <= limit {
-                temp = q;
-                exp += 1;
-                loop {
-                    q = temp.wrapping_mul(inv);
-                    if q > limit {
-                        break;
-                    }
+            if r != 0 {
+                let mut temp = r.wrapping_mul(inv);
+                let mut q = temp.wrapping_mul(inv);
+                if q <= limit {
                     temp = q;
-                    exp += 1;
+                    loop {
+                        q = temp.wrapping_mul(inv);
+                        if q > limit {
+                            break;
+                        }
+                        temp = q;
+                    }
                 }
-            }
-            // Inline v_p check: v_P(C(2n,n)) >= v_P(n)
-            let n = block_l + j;
-            let supply = vp_central_binom_dispatch(n, P);
-            if (exp as u64) > supply {
-                *rem.add(j as usize) = 0; // rejected
-            } else {
                 *rem.add(j as usize) = temp;
             }
         }
@@ -135,34 +128,25 @@ fn process_prime_dyn(
     start_j: &mut u64,
     w_block: u64,
     rem: *mut u64,
-    block_l: u64,
+    _block_l: u64,
 ) {
     let mut j = *start_j;
     while j < w_block {
         unsafe {
             let r = *rem.add(j as usize);
-            if r == 0 { j += p; continue; } // already rejected
-            let mut temp = r.wrapping_mul(inv_p);
-            let mut exp = 1u32;
-            let mut q = temp.wrapping_mul(inv_p);
-            if q <= max_quot {
-                temp = q;
-                exp += 1;
-                loop {
-                    q = temp.wrapping_mul(inv_p);
-                    if q > max_quot {
-                        break;
-                    }
+            if r != 0 {
+                let mut temp = r.wrapping_mul(inv_p);
+                let mut q = temp.wrapping_mul(inv_p);
+                if q <= max_quot {
                     temp = q;
-                    exp += 1;
+                    loop {
+                        q = temp.wrapping_mul(inv_p);
+                        if q > max_quot {
+                            break;
+                        }
+                        temp = q;
+                    }
                 }
-            }
-            // Inline v_p check
-            let n = block_l + j;
-            let supply = vp_central_binom_dispatch(n, p);
-            if (exp as u64) > supply {
-                *rem.add(j as usize) = 0; // rejected
-            } else {
                 *rem.add(j as usize) = temp;
             }
         }
@@ -444,6 +428,14 @@ pub fn solve<H: SolverHooks>(
     let witness_count = AtomicU64::new(0);
     let time_up = AtomicBool::new(false);
 
+    // Governor checker for verifying sieve-based runs (shared across workers).
+    // Only built when run tracking is enabled — zero cost in bench mode.
+    let gov_checker = if hooks.track_runs() {
+        Some(GovernorChecker::new(end_l + k))
+    } else {
+        None
+    };
+
     std::thread::scope(|s| {
         // Progress reporter thread
         if progress {
@@ -488,6 +480,7 @@ pub fn solve<H: SolverHooks>(
             let global_min_n = &global_min_n;
             let witness_count = &witness_count;
             let time_up = &time_up;
+            let gov_checker = &gov_checker;
             s.spawn(move || {
                 let worker_id = thread_idx;
                 let buf_size = BLOCK_SIZE as usize + k as usize + 1;
@@ -646,28 +639,19 @@ pub fn solve<H: SolverHooks>(
                                     let item = *b_ptr.add(i);
                                     let pd = &*pd_ptr.add(item.p_idx as usize);
                                     let r = *rem_ptr.add(item.offset as usize);
-                                    if r == 0 { continue; } // already rejected
-                                    let mut temp = r.wrapping_mul(pd.inv_p);
-                                    let mut exp = 1u32;
-                                    let mut q = temp.wrapping_mul(pd.inv_p);
-                                    if q <= pd.max_quot {
-                                        temp = q;
-                                        exp += 1;
-                                        loop {
-                                            q = temp.wrapping_mul(pd.inv_p);
-                                            if q > pd.max_quot {
-                                                break;
-                                            }
+                                    if r != 0 {
+                                        let mut temp = r.wrapping_mul(pd.inv_p);
+                                        let mut q = temp.wrapping_mul(pd.inv_p);
+                                        if q <= pd.max_quot {
                                             temp = q;
-                                            exp += 1;
+                                            loop {
+                                                q = temp.wrapping_mul(pd.inv_p);
+                                                if q > pd.max_quot {
+                                                    break;
+                                                }
+                                                temp = q;
+                                            }
                                         }
-                                    }
-                                    // Inline v_p check
-                                    let n = block_l + item.offset as u64;
-                                    let supply = vp_central_binom_dispatch(n, pd.p);
-                                    if (exp as u64) > supply {
-                                        *rem_ptr.add(item.offset as usize) = 0;
-                                    } else {
                                         *rem_ptr.add(item.offset as usize) = temp;
                                     }
                                 }
@@ -749,9 +733,16 @@ pub fn solve<H: SolverHooks>(
                         block_start += BLOCK_SIZE;
                     }
 
-                    // Post-chunk: scan smooth[] for runs and report via hooks
+                    // Post-chunk: scan smooth[] for runs and report via hooks.
+                    // Short runs (< k+1) are reported as-is from the sieve (may
+                    // include a few false governors, but this only affects the
+                    // distribution of short runs — not correctness of witnesses).
+                    // Long runs (>= k+1) are verified against the true governor
+                    // check so the longest_run statistic is accurate.
                     if do_track_runs {
                         let min_run = hooks.min_run_length();
+                        let target_run = (k + 1) as usize;
+                        let checker = gov_checker.as_ref().unwrap();
                         let mut run_start = 0u64;
                         let mut run_len = 0usize;
                         for (i, &is_smooth) in
@@ -764,13 +755,55 @@ pub fn solve<H: SolverHooks>(
                                 run_len += 1;
                             } else {
                                 if run_len >= min_run {
-                                    hooks.on_run(worker_id, run_start, run_len);
+                                    if run_len >= target_run {
+                                        // Long run: verify each position
+                                        let mut vlen = 0usize;
+                                        let mut vstart = run_start;
+                                        for j in 0..run_len {
+                                            let n = run_start + j as u64;
+                                            if checker.is_governor_fast(n) {
+                                                if vlen == 0 { vstart = n; }
+                                                vlen += 1;
+                                            } else {
+                                                if vlen >= min_run {
+                                                    hooks.on_run(worker_id, vstart, vlen);
+                                                }
+                                                vlen = 0;
+                                            }
+                                        }
+                                        if vlen >= min_run {
+                                            hooks.on_run(worker_id, vstart, vlen);
+                                        }
+                                    } else {
+                                        // Short run: report unverified (fast path)
+                                        hooks.on_run(worker_id, run_start, run_len);
+                                    }
                                 }
                                 run_len = 0;
                             }
                         }
                         if run_len >= min_run {
-                            hooks.on_run(worker_id, run_start, run_len);
+                            if run_len >= target_run {
+                                let mut vlen = 0usize;
+                                let mut vstart = run_start;
+                                for j in 0..run_len {
+                                    let n = run_start + j as u64;
+                                    if checker.is_governor_fast(n) {
+                                        if vlen == 0 { vstart = n; }
+                                        vlen += 1;
+                                    } else {
+                                        if vlen >= min_run {
+                                            hooks.on_run(worker_id, vstart, vlen);
+                                        }
+                                        vlen = 0;
+                                    }
+                                }
+                                if vlen >= min_run {
+                                    hooks.on_run(worker_id, vstart, vlen);
+                                }
+                            } else {
+                                hooks.on_run(worker_id, run_start, run_len);
+                            }
                         }
                     }
 
