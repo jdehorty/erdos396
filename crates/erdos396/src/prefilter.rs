@@ -14,6 +14,7 @@
 //!    of each prime (amortized), while trial division tests every prime
 //!    against every number.
 
+use crate::governor::vp_central_binom_dispatch;
 use crate::int_math::isqrt_u128;
 use crate::sieve::{build_prime_data, PrimeData};
 
@@ -248,7 +249,7 @@ impl FusedBatchResult {
             let block_end = (block_start + BLOCK_SIZE).min(len);
             let block_len = (block_end - block_start) as u32;
 
-            // Small primes: strip with skip-if-rejected optimization
+            // Small primes: strip with skip-if-rejected + inline v_p check
             let block_len_u64 = block_len as u64;
             for pidx in first_odd..first_large {
                 let pd = &prime_data[pidx];
@@ -257,7 +258,7 @@ impl FusedBatchResult {
                     while sj < block_len_u64 {
                         let abs_idx = block_start + sj as usize;
                         if !rejected[abs_idx] {
-                            dispatch_strip!(
+                            let exp = dispatch_strip!(
                                 &mut remaining[abs_idx],
                                 pd,
                                 [
@@ -265,6 +266,14 @@ impl FusedBatchResult {
                                     61, 67, 71, 73, 79, 83, 89, 97
                                 ]
                             );
+                            // Check v_p(C(2n,n)) >= v_p(n) inline
+                            if exp > 0 {
+                                let n = lo + abs_idx as u64;
+                                let supply = vp_central_binom_dispatch(n, pd.p);
+                                if (exp as u64) > supply {
+                                    rejected[abs_idx] = true;
+                                }
+                            }
                         }
                         sj += pd.p;
                     }
@@ -301,7 +310,15 @@ impl FusedBatchResult {
                     let abs_idx = block_start + item.offset as usize;
                     if !rejected[abs_idx] {
                         let pd = &prime_data[item.pd_idx as usize];
-                        strip_prime_dyn(&mut remaining[abs_idx], pd.inv_p, pd.max_quot);
+                        let exp = strip_prime_dyn(&mut remaining[abs_idx], pd.inv_p, pd.max_quot);
+                        // Check v_p(C(2n,n)) >= v_p(n) inline
+                        if exp > 0 {
+                            let n = lo + abs_idx as u64;
+                            let supply = vp_central_binom_dispatch(n, pd.p);
+                            if (exp as u64) > supply {
+                                rejected[abs_idx] = true;
+                            }
+                        }
                     }
                 }
             }
@@ -310,10 +327,9 @@ impl FusedBatchResult {
         }
 
         // =====================================================================
-        // PHASE 2: Classify — cheap v_2 check only, defer full v_p to run
-        // verification.  Smooth numbers that pass v_2 are marked as governors.
-        // This is a superset of true governors (false-positive rate ~6%), but
-        // false-positive RUNS are vanishingly rare and caught by verification.
+        // PHASE 2: Classify — rejected[] already has v_2 (from init) and
+        // v_p for all odd primes (from Phase 1 inline checks). Remaining > 1
+        // means a large prime factor. Everything else is a confirmed governor.
         // =====================================================================
 
         let mut is_governor = vec![false; len];
@@ -333,6 +349,12 @@ impl FusedBatchResult {
                 continue;
             }
 
+            if rejected[i] {
+                // Failed v_2 (from init) or v_p for some odd prime (from Phase 1)
+                rejected_vp_fail += 1;
+                continue;
+            }
+
             if remaining[i] > 1 {
                 // Not smooth — has a large prime factor > sieve_limit
                 let n_odd = n >> n.trailing_zeros();
@@ -344,15 +366,9 @@ impl FusedBatchResult {
                 continue;
             }
 
-            // Smooth (remaining == 1): cheap v_2 check only
-            // v_2(C(2n,n)) = popcount(n), v_2(n) = trailing_zeros(n)
-            let tz = n.trailing_zeros();
-            if n.count_ones() >= tz {
-                is_governor[i] = true;
-                governor_count += 1;
-            } else {
-                rejected_vp_fail += 1;
-            }
+            // Smooth + passed all v_p checks → confirmed governor
+            is_governor[i] = true;
+            governor_count += 1;
         }
 
         Self {
