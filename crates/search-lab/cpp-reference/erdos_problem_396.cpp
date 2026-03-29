@@ -15,7 +15,7 @@
 #include <sstream>
 #include <cstdlib>
 
-const unsigned int NUM_THREADS = std::thread::hardware_concurrency();
+unsigned int NUM_THREADS = std::thread::hardware_concurrency();
 
 struct PrimeData
 {
@@ -472,7 +472,7 @@ int main(int argc, char** argv)
 {
     uint64_t start_k = 0, start_L = 0, end_L = UINT64_MAX, k_max = 20;
 
-    // Parse CLI args: -k K, --start N, --end N, --kmax K
+    // Parse CLI args: -k K, --start N, --end N, --kmax K, --threads T
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
@@ -484,10 +484,12 @@ int main(int argc, char** argv)
             end_L = std::stoull(argv[++i]);
         else if (a == "--kmax" && i + 1 < argc)
             k_max = std::stoull(argv[++i]);
+        else if (a == "--threads" && i + 1 < argc)
+            NUM_THREADS = static_cast<unsigned int>(std::stoull(argv[++i]));
         else
         {
             std::cerr << "Usage: " << argv[0]
-                      << " [-k K] [--start N] [--end N] [--kmax K]\n";
+                      << " [-k K] [--start N] [--end N] [--kmax K] [--threads T]\n";
             return 1;
         }
     }
@@ -513,18 +515,19 @@ int main(int argc, char** argv)
         }
     }
 
-    std::cout << "erdos396-ref | threads=" << NUM_THREADS
+    std::cout << "# erdos396-ref | threads=" << NUM_THREADS
               << " k=" << start_k << ".." << k_max
               << " start=" << start_L
               << " end=" << (end_L == UINT64_MAX ? "inf" : std::to_string(end_L))
               << "\n";
 
-    std::cout << "Generating primes up to 200,000,000...\n";
     auto start_primes = std::chrono::high_resolution_clock::now();
     get_primes(200000000);
     auto end_primes = std::chrono::high_resolution_clock::now();
-    std::cout << "Primes generated in " << std::chrono::duration<double>(end_primes - start_primes).count()
-              << " seconds.\n\n";
+    std::cout << "# primes: " << primes.size() << " in "
+              << std::fixed << std::setprecision(3)
+              << std::chrono::duration<double>(end_primes - start_primes).count()
+              << "s\n";
 
     for (uint64_t k = start_k; k <= k_max; ++k)
     {
@@ -544,11 +547,12 @@ int main(int argc, char** argv)
             candidates_checked = 1;
         double speed = candidates_checked / seconds;
 
+        std::string witness_str = (ans < UINT64_MAX) ? std::to_string(ans) : "none";
         std::ostringstream oss;
-        oss << "k = " << std::setw(2) << k
-            << " | min n = " << std::setw(15) << (ans < UINT64_MAX ? std::to_string(ans) : "none")
-            << " | Time: " << std::fixed << std::setprecision(4) << std::setw(12) << seconds << " s"
-            << " | Speed: " << std::fixed << std::setprecision(2) << std::setw(8) << (speed / 1e6) << " M candidates/s\n";
+        oss << "R\t" << k << "\t" << witness_str
+            << "\t" << std::fixed << std::setprecision(4) << seconds
+            << "\t" << candidates_checked
+            << "\t" << std::fixed << std::setprecision(2) << (speed / 1e6) << "\n";
 
         std::string output_str = oss.str();
         std::cout << output_str;

@@ -759,15 +759,15 @@ fn main() {
         format!("{}", end_l)
     };
     println!(
-        "erdos396-speed-rust | threads={} k={}..{} start={} end={} run_log>={}",
-        n_threads, k_start, k_max, start_l, end_str, run_log
+        "# erdos396-search-lab | threads={} k={}..{} start={} end={}",
+        n_threads, k_start, k_max, start_l, end_str
     );
 
     let t0 = Instant::now();
     let primes = sieve_primes(200_000_000);
     let prime_data = build_prime_data(&primes);
     println!(
-        "Primes: {} in {:.3}s\n",
+        "# primes: {} in {:.3}s",
         primes.len(),
         t0.elapsed().as_secs_f64()
     );
@@ -776,11 +776,18 @@ fn main() {
         let ts = Instant::now();
         let ans = solve(k, start_l, end_l, &prime_data, n_threads, run_log);
         let sec = ts.elapsed().as_secs_f64();
-        let speed =
-            if ans >= start_l { (ans - start_l + 1) as f64 } else { 1.0 } / sec;
+
+        let (witness_str, candidates) = if ans < u64::MAX && ans >= start_l {
+            (ans.to_string(), ans - start_l + 1)
+        } else if end_l < u64::MAX {
+            ("none".to_string(), end_l - start_l)
+        } else {
+            ("none".to_string(), 1)
+        };
+        let speed = candidates as f64 / sec;
         let line = format!(
-            "k={:2}  n={:15}  {:.4}s  {:.2} M/s",
-            k, ans, sec, speed / 1e6
+            "R\t{}\t{}\t{:.4}\t{}\t{:.2}",
+            k, witness_str, sec, candidates, speed / 1e6
         );
         println!("{}", line);
 

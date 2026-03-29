@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Parse Rust benchmark output into markdown table rows.
+"""Parse benchmark TSV output into markdown table rows.
 
-Computes throughput from elapsed time and the known range (not the binary's
-self-reported speed, which is wrong when --end caps the search before finding
-a witness).
+Reads lines starting with 'R\t' (the universal benchmark contract) and
+computes throughput from elapsed time and known range sizes.
 """
-import re, sys
+import sys
 
 # k=9,10: full witness ranges (chains from k=8 witness)
 # k=11:   capped at 50B candidates (witness at 1.07T is too far)
@@ -18,12 +17,15 @@ RANGES = {
 }
 
 for line in open(sys.argv[1]):
-    m = re.match(r'k=\s*(\d+)\s+n=\s*\d+\s+([\d.]+)s', line)
-    if m:
-        k, elapsed = int(m.group(1)), float(m.group(2))
-        if k in RANGES:
-            s, e = RANGES[k]
-            r = e - s
-            speed = r / elapsed / 1e6
-            print("| %d | `[%d, %d)` | %s | %.3f | %.1f |" % (k, s, e, format(r, ","), elapsed, speed))
-            sys.stderr.write("  k=%-4d  %.3fs  %.1f M/s\n" % (k, elapsed, speed))
+    if not line.startswith("R\t"):
+        continue
+    fields = line.strip().split("\t")
+    # Fields: R, k, witness, elapsed_secs, candidates_checked, speed_mcps
+    k = int(fields[1])
+    elapsed = float(fields[3])
+    if k in RANGES:
+        s, e = RANGES[k]
+        r = e - s
+        speed = r / elapsed / 1e6
+        print("| %d | `[%d, %d)` | %s | %.4f | %.1f |" % (k, s, e, format(r, ","), elapsed, speed))
+        sys.stderr.write("  k=%-4d  %.4fs  %.1f M/s\n" % (k, elapsed, speed))

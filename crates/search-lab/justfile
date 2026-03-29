@@ -1,4 +1,10 @@
 # search-lab — build and benchmark recipes for Rust and C++ implementations
+#
+# Universal benchmark contract:
+#   CLI:    <binary> -k K --kmax KMAX --start N --end N --threads T
+#   Output: "R\t{k}\t{witness}\t{elapsed_s}\t{candidates}\t{speed_mcps}" on stdout
+#           Lines starting with "#" are informational (ignored by parser)
+#           Stderr is free for progress/diagnostics
 
 # Override with: just threads=8 bench
 threads := `python3 -c "import os; print(os.cpu_count() or 4)"`
@@ -30,14 +36,35 @@ build: build-rust build-cpp
 #
 # NOTE: Run bench-rust and bench-cpp separately to avoid thermal throttling.
 
-# Benchmark Rust implementation
-bench-rust: build-rust
+# Benchmark a single implementation. impl must be "rust" or "cpp".
+bench impl="rust":
     #!/usr/bin/env bash
     set -euo pipefail
-    BIN="../../target/release/erdos396-search-lab"
+    IMPL="{{impl}}"
     THREADS="{{threads}}"
-    OUT="bench-rust.md"
 
+    # Dispatch to correct binary, build step, and compiler info
+    case "$IMPL" in
+        rust)
+            just build-rust
+            BIN="../../target/release/erdos396-search-lab"
+            COMPILER=$(rustc --version 2>/dev/null || echo "unknown")
+            TITLE="search-lab Benchmark (Rust)"
+            ;;
+        cpp)
+            just build-cpp
+            BIN="cpp-reference/erdos396_ref"
+            COMPILER=$(${CXX:-g++} --version 2>/dev/null | head -1 || echo "unknown")
+            TITLE="search-lab Benchmark (C++ reference, Sharvil Kesarwani)"
+            ;;
+        *)
+            echo "Unknown impl: $IMPL (use rust or cpp)" >&2
+            exit 1
+            ;;
+    esac
+    OUT="bench-${IMPL}.md"
+
+    # Detect environment
     if [[ "$(uname)" == "Darwin" ]]; then
         cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
         mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
@@ -49,12 +76,11 @@ bench-rust: build-rust
         mem="$(( mem_kb / 1048576 )) GB"
         os_info=$(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"' || echo "Linux")
     fi
-    rustc_ver=$(rustc --version 2>/dev/null || echo "unknown")
     git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     timestamp=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
     {
-        echo "# search-lab Benchmark (Rust)"
+        echo "# $TITLE"
         echo ""
         echo "Per-k throughput (sieve time excluded). k=9,10 use full witness"
         echo "ranges. k=11 is capped at 50B candidates. k=13 matches the k=9-11"
@@ -68,7 +94,7 @@ bench-rust: build-rust
         echo "| **Memory** | $mem |"
         echo "| **OS** | $os_info |"
         echo "| **Threads** | $THREADS |"
-        echo "| **rustc** | \`$rustc_ver\` |"
+        echo "| **Compiler** | \`$COMPILER\` |"
         echo "| **Commit** | \`$git_hash\` |"
         echo "| **Date** | $timestamp |"
         echo ""
@@ -83,99 +109,32 @@ bench-rust: build-rust
     # Phase 1: k=9,10 continuous (finds both witnesses)
     echo "  Phase 1: k=9,10 full sweep..." >&2
     "$BIN" -k 9 --kmax 10 --start 339949252 \
-        --threads "$THREADS" --run-log 100 > "$TMPOUT" 2>/dev/null || true
+        --threads "$THREADS" > "$TMPOUT" 2>/dev/null || true
 
     # Phase 2: k=11 capped at 50B candidates
     echo "  Phase 2: k=11 [17.6B, 67.6B) (50B candidates)..." >&2
     "$BIN" -k 11 --kmax 11 --start 17609764994 --end 67609764994 \
-        --threads "$THREADS" --run-log 100 >> "$TMPOUT" 2>/dev/null || true
+        --threads "$THREADS" >> "$TMPOUT" 2>/dev/null || true
 
     # Phase 3: k=13 with same total (~67.3B candidates)
     echo "  Phase 3: k=13 [18.186T, 18.253T) (67.3B candidates)..." >&2
     "$BIN" -k 13 --kmax 13 --start 18185829921842 --end 18253129921842 \
-        --threads "$THREADS" --run-log 100 >> "$TMPOUT" 2>/dev/null || true
+        --threads "$THREADS" >> "$TMPOUT" 2>/dev/null || true
 
     python3 parse_bench.py "$TMPOUT" >> "$OUT" 2>&2
     rm -f "$TMPOUT"
 
     echo "" | tee -a "$OUT"
     echo "Results written to: $OUT" >&2
+
+    # Clean up transient files
     rm -f results.txt checkpoint.txt checkpoint.tmp 2>/dev/null || true
-
-# Benchmark C++ reference implementation (Sharvil Kesarwani)
-bench-cpp: build-cpp
-    #!/usr/bin/env bash
-    set -euo pipefail
-    OUT="bench-cpp.md"
-
-    if [[ "$(uname)" == "Darwin" ]]; then
-        cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
-        mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
-        mem="$(( mem_bytes / 1073741824 )) GB"
-        os_info="$(sw_vers -productName 2>/dev/null || echo macOS) $(sw_vers -productVersion 2>/dev/null || echo "")"
-    else
-        cpu=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "unknown")
-        mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
-        mem="$(( mem_kb / 1048576 )) GB"
-        os_info=$(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"' || echo "Linux")
-    fi
-    cxx_ver=$(${CXX:-g++} --version 2>/dev/null | head -1 || echo "unknown")
-    git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-    timestamp=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-    hw_threads=$(python3 -c "import os; print(os.cpu_count() or '?')")
-
-    {
-        echo "# search-lab Benchmark (C++ reference, Sharvil Kesarwani)"
-        echo ""
-        echo "Per-k throughput (sieve time excluded). k=9,10 use full witness"
-        echo "ranges. k=11 is capped at 50B candidates. k=13 matches the k=9-11"
-        echo "total (~67.3B candidates) at production sieve depth."
-        echo ""
-        echo "Note: thread count is hardcoded to hardware_concurrency() in the binary."
-        echo ""
-        echo "## Environment"
-        echo ""
-        echo "| | |"
-        echo "|---|---|"
-        echo "| **CPU** | $cpu |"
-        echo "| **Memory** | $mem |"
-        echo "| **OS** | $os_info |"
-        echo "| **Threads** | $hw_threads |"
-        echo "| **C++** | \`$cxx_ver\` |"
-        echo "| **Commit** | \`$git_hash\` |"
-        echo "| **Date** | $timestamp |"
-        echo ""
-        echo "## Results"
-        echo ""
-        echo "| k | Range | Candidates | Time (s) | Throughput (M/s) |"
-        echo "|--:|:------|-----------:|---------:|-----------------:|"
-    } | tee "$OUT"
-
-    BIN="cpp-reference/erdos396_ref"
-    TMPOUT=$(mktemp)
-
-    # Phase 1: k=9,10 continuous (finds both witnesses)
-    echo "  Phase 1: k=9,10 full sweep..." >&2
-    "$BIN" -k 9 --kmax 10 --start 339949252 > "$TMPOUT" 2>/dev/null || true
-
-    # Phase 2: k=11 capped at 50B candidates
-    echo "  Phase 2: k=11 [17.6B, 67.6B) (50B candidates)..." >&2
-    "$BIN" -k 11 --kmax 11 --start 17609764994 --end 67609764994 >> "$TMPOUT" 2>/dev/null || true
-
-    # Phase 3: k=13 with same total (~67.3B candidates)
-    echo "  Phase 3: k=13 [18.186T, 18.253T) (67.3B candidates)..." >&2
-    "$BIN" -k 13 --kmax 13 --start 18185829921842 --end 18253129921842 >> "$TMPOUT" 2>/dev/null || true
-
-    python3 parse_bench_cpp.py "$TMPOUT" >> "$OUT" 2>&2
-    rm -f "$TMPOUT"
-
-    echo "" | tee -a "$OUT"
-    echo "Results written to: $OUT" >&2
     rm -f cpp-reference/checkpoint-396.txt cpp-reference/checkpoint-396.tmp \
           cpp-reference/results-396.txt 2>/dev/null || true
 
-# Benchmark both implementations (NOTE: run separately for accurate thermal results)
-bench: bench-rust bench-cpp
+# Convenience aliases
+bench-rust: (bench "rust")
+bench-cpp: (bench "cpp")
 
 # ─── Clean ────────────────────────────────────────────────────────────
 
