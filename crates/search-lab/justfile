@@ -56,8 +56,8 @@ bench-rust: build-rust
     {
         echo "# search-lab Benchmark (Rust)"
         echo ""
-        echo "Measures wall-clock throughput of the witness search. k=8, k=9, k=10"
-        echo "run over the full known witness ranges. k=13 runs a 10B-candidate"
+        echo "Measures per-k throughput of the witness search (sieve time excluded)."
+        echo "k=8, k=9, k=10 run over full witness ranges. k=13 runs a 10B-candidate"
         echo "slice at production scale (sieve_limit ~ 6M primes)."
         echo ""
         echo "## Environment"
@@ -78,28 +78,21 @@ bench-rust: build-rust
         echo "|--:|:------|-----------:|---------:|-----------------:|"
     } | tee "$OUT"
 
-    bench() {
-        local k=$1 start=$2 end=$3
-        local range=$(( end - start ))
-        printf "  k=%-4s  %-36s" "$k" "[$start, $end)" >&2
-        local t0
-        t0=$(python3 -c 'import time; print(time.time())')
-        "$BIN" -k "$k" --kmax "$k" --start "$start" --end "$end" \
-            --threads "$THREADS" --run-log 100 > /dev/null 2>&1 || true
-        local t1
-        t1=$(python3 -c 'import time; print(time.time())')
-        local elapsed speed range_fmt
-        elapsed=$(python3 -c "print(f'{$t1 - $t0:.3f}')")
-        speed=$(python3 -c "print(f'{$range / ($t1 - $t0) / 1e6:.1f}')")
-        range_fmt=$(python3 -c "print(f'{$range:,}')")
-        echo "  ${elapsed}s  ${speed} M/s" >&2
-        echo "| $k | \`[$start, $end)\` | $range_fmt | $elapsed | $speed |" | tee -a "$OUT"
-    }
+    # --- Phase 1: k=8,9,10 in a single invocation (sieve amortized) ---
+    echo "  Running k=8,9,10 in single process (sieve shared)..." >&2
+    TMPOUT=$(mktemp)
+    "$BIN" -k 8 --kmax 10 --start 1 \
+        --threads "$THREADS" --run-log 100 > "$TMPOUT" 2>/dev/null || true
 
-    bench 8  1          339949253
-    bench 9  339949252  1019547845
-    bench 10 1019547844 17609764995
-    bench 13 18243129921842 18253129921843
+    # --- Phase 2: k=13 separate (different start range) ---
+    echo "  Running k=13 [18.243T, 18.253T)..." >&2
+    "$BIN" -k 13 --kmax 13 --start 18243129921842 --end 18253129921843 \
+        --threads "$THREADS" --run-log 100 >> "$TMPOUT" 2>/dev/null || true
+
+    # Parse all k= lines with Python (avoids bash associative array issues)
+    python3 parse_bench.py "$TMPOUT" >> "$OUT" 2>&2
+
+    rm -f "$TMPOUT"
 
     echo "" | tee -a "$OUT"
     echo "Results written to: $OUT" >&2

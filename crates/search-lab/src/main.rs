@@ -20,8 +20,10 @@ const BLOCK_MASK: u32 = 0x7FFF;
 #[derive(Clone, Copy)]
 struct PrimeData {
     p: u32,
-    inv_p: u64,   // modular inverse of p mod 2^64
+    shift: u8,     // bit_width(p) - 1 — for Barrett reduction
+    inv_p: u64,    // modular inverse of p mod 2^64
     max_quot: u64, // u64::MAX / p — used for divisibility test
+    magic: u64,    // Barrett magic constant for fast division: ceil(2^(64+shift) / p)
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +108,7 @@ fn sieve_primes(limit: usize) -> Vec<Prime> {
 }
 
 /// Build PrimeData vec from raw primes vec.
+/// Precomputes modular inverse, Barrett magic constant, and divisibility threshold.
 fn build_prime_data(primes: &[Prime]) -> Vec<PrimeData> {
     primes
         .iter()
@@ -116,10 +119,20 @@ fn build_prime_data(primes: &[Prime]) -> Vec<PrimeData> {
             } else {
                 0
             };
+            // Barrett reduction: magic = ceil(2^(64+shift) / p)
+            // shift = bit_width(p) - 1
+            let shift = (32 - p.leading_zeros()).saturating_sub(1) as u8;
+            let magic = if p > 1 {
+                (((1u128 << (64 + shift as u32)) / p64 as u128) + 1) as u64
+            } else {
+                0
+            };
             PrimeData {
                 p,
+                shift,
                 inv_p,
                 max_quot: u64::MAX / p64,
+                magic,
             }
         })
         .collect()
@@ -455,10 +468,14 @@ fn solve(
                     let first_large_prime_idx = prime_data[..chunk_total_primes]
                         .partition_point(|pd| pd.p <= BLOCK_SIZE);
 
-                    // Compute initial offsets for all primes (skip p=2 at idx 0)
+                    // Compute initial offsets via Barrett reduction (no hardware div)
                     for idx in 1..chunk_total_primes {
-                        let p = prime_data[idx].p as u64;
-                        let start_c = (l_chunk + p - 1) / p;
+                        let pd = &prime_data[idx];
+                        let p = pd.p as u64;
+                        let num = l_chunk + p - 1;
+                        // Barrett: start_c = ceil(num / p) = floor((num * magic) >> (64 + shift))
+                        let start_c = (((num as u128).wrapping_mul(pd.magic as u128)) >> 64) as u64
+                            >> pd.shift as u64;
                         prime_offsets[idx] = (start_c * p - l_chunk) as u32;
                     }
 
