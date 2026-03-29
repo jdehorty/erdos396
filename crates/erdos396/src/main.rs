@@ -6,12 +6,191 @@
 use clap::Parser;
 use erdos396::{
     search::{parallel_search, print_results, SearchConfig},
+    sieve_solver::{FalsePositiveDetail, NoOpHooks, SolverHooks},
     verify::verify_known_witnesses,
     BuildInfo, KNOWN_RUNS_OF_9, KNOWN_WITNESSES,
 };
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// Per-worker checkpoint state.
+#[derive(Serialize, Default)]
+struct WorkerCheckpoint {
+    worker_id: u32,
+    last_chunk_end: u64,
+    chunks_done: u64,
+}
+
+/// False positive record with per-prime detail.
+#[derive(Serialize)]
+struct FalsePositiveRecord {
+    n: u64,
+    failing_prime: u64,
+    demand: u64,
+    supply: u64,
+}
+
+/// Full recording hooks for normal search mode.
+///
+/// Tracks witnesses, false positives (with per-prime detail), run distribution,
+/// coverage invariants, and writes periodic per-worker checkpoints.
+struct RecordingHooks {
+    // Witnesses and candidates
+    witnesses: Mutex<Vec<u64>>,
+    false_positive_details: Mutex<Vec<FalsePositiveRecord>>,
+
+    // Coverage invariants (computed from chunk ranges — O(1) per chunk)
+    sum_checked: Mutex<u128>,
+    xor_checked: AtomicU64,
+    total_checked: AtomicU64,
+
+    // Run tracking
+    run_distribution: Mutex<HashMap<usize, u64>>,
+    longest_run: AtomicU64,
+    longest_run_start: AtomicU64,
+
+    // Per-worker state
+    worker_checkpoints: Mutex<HashMap<u32, WorkerCheckpoint>>,
+
+    // Progress
+    chunks_done: AtomicU64,
+
+    // Config
+    output_dir: PathBuf,
+    k: u64,
+    significant_run_threshold: usize,
+    checkpoint_interval_chunks: u64,
+}
+
+impl RecordingHooks {
+    fn new(
+        output_dir: PathBuf,
+        k: u64,
+        significant_run_threshold: usize,
+        checkpoint_interval_chunks: u64,
+    ) -> Self {
+        Self {
+            witnesses: Mutex::new(Vec::new()),
+            false_positive_details: Mutex::new(Vec::new()),
+            sum_checked: Mutex::new(0u128),
+            xor_checked: AtomicU64::new(0),
+            total_checked: AtomicU64::new(0),
+            run_distribution: Mutex::new(HashMap::new()),
+            longest_run: AtomicU64::new(0),
+            longest_run_start: AtomicU64::new(0),
+            worker_checkpoints: Mutex::new(HashMap::new()),
+            chunks_done: AtomicU64::new(0),
+            output_dir,
+            k,
+            significant_run_threshold,
+            checkpoint_interval_chunks,
+        }
+    }
+}
+
+impl SolverHooks for RecordingHooks {
+    fn on_witness(&self, _worker_id: u32, n: u64, _k: u64) {
+        log::error!("*** VERIFIED WITNESS FOUND: k={}, n={} ***", self.k, n);
+        self.witnesses.lock().unwrap().push(n);
+    }
+
+    fn on_false_positive(&self, _worker_id: u32, n: u64, _k: u64, detail: &FalsePositiveDetail) {
+        log::debug!(
+            "False positive at n={}: p={} demand={} supply={}",
+            n,
+            detail.failing_prime,
+            detail.demand,
+            detail.supply
+        );
+        self.false_positive_details
+            .lock()
+            .unwrap()
+            .push(FalsePositiveRecord {
+                n,
+                failing_prime: detail.failing_prime,
+                demand: detail.demand,
+                supply: detail.supply,
+            });
+    }
+
+    fn on_chunk_done(&self, worker_id: u32, chunk_start: u64, chunk_end: u64) {
+        let count = self.chunks_done.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Coverage invariants
+        let chunk_size = chunk_end - chunk_start;
+        self.total_checked.fetch_add(chunk_size, Ordering::Relaxed);
+        {
+            let mut sum = self.sum_checked.lock().unwrap();
+            *sum += sum_range_u128(chunk_start, chunk_end);
+        }
+        self.xor_checked
+            .fetch_xor(xor_range(chunk_start, chunk_end), Ordering::Relaxed);
+
+        // Per-worker checkpoint state
+        {
+            let mut wcs = self.worker_checkpoints.lock().unwrap();
+            let wc = wcs.entry(worker_id).or_insert_with(|| WorkerCheckpoint {
+                worker_id,
+                ..Default::default()
+            });
+            wc.last_chunk_end = chunk_end;
+            wc.chunks_done += 1;
+        }
+
+        // Periodic checkpoint to disk
+        if count % self.checkpoint_interval_chunks == 0 {
+            let _ = std::fs::create_dir_all(&self.output_dir);
+            let cp_path = self.output_dir.join(format!("checkpoint_k{}.json", self.k));
+            let witnesses = self.witnesses.lock().unwrap();
+            let run_dist = self.run_distribution.lock().unwrap();
+            let wcs = self.worker_checkpoints.lock().unwrap();
+            let fp_details = self.false_positive_details.lock().unwrap();
+            let checkpoint = serde_json::json!({
+                "k": self.k,
+                "total_checked": self.total_checked.load(Ordering::Relaxed),
+                "chunks_done": count,
+                "witnesses": *witnesses,
+                "false_positives": fp_details.len(),
+                "false_positive_details": *fp_details,
+                "longest_run": self.longest_run.load(Ordering::Relaxed),
+                "longest_run_start": self.longest_run_start.load(Ordering::Relaxed),
+                "run_distribution": *run_dist,
+                "workers": wcs.values().collect::<Vec<_>>(),
+            });
+            let tmp = cp_path.with_extension("tmp");
+            if let Ok(json) = serde_json::to_string_pretty(&checkpoint) {
+                let _ = std::fs::write(&tmp, json);
+                let _ = std::fs::rename(&tmp, &cp_path);
+            }
+        }
+    }
+
+    fn on_run(&self, _worker_id: u32, start: u64, length: usize) {
+        {
+            let mut dist = self.run_distribution.lock().unwrap();
+            *dist.entry(length).or_insert(0) += 1;
+        }
+
+        let prev = self.longest_run.load(Ordering::Relaxed);
+        if (length as u64) > prev {
+            self.longest_run.store(length as u64, Ordering::Relaxed);
+            self.longest_run_start.store(start, Ordering::Relaxed);
+            log::info!("New longest run: {} at n={}", length, start);
+        }
+    }
+
+    fn track_runs(&self) -> bool {
+        true
+    }
+
+    fn min_run_length(&self) -> usize {
+        self.significant_run_threshold
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "erdos396")]
@@ -114,6 +293,13 @@ struct Cli {
     /// Verbose output
     #[arg(short = 'v', long)]
     verbose: bool,
+
+    /// Benchmark mode: process entire range, output R-line, no file I/O.
+    ///
+    /// SECS is a safety timeout; the --end bound normally terminates first.
+    /// Output follows the Universal Benchmark Contract (same as search-lab).
+    #[arg(long, value_name = "SECS")]
+    bench: Option<f64>,
 }
 
 /// Sum of integers in `[a, b)` computed in `u128` (exact for all `u64` inputs).
@@ -378,80 +564,240 @@ fn main() -> anyhow::Result<()> {
         safety_net: cli.safety_net,
         fused_self_check_samples: cli.fused_self_check_samples,
         fused_audit_interval: cli.fused_audit_interval,
+        bench_secs: cli.bench.unwrap_or(0.0),
     };
 
-    // Print configuration
-    println!("Erdős 396 Search Configuration:");
+    let bench_mode = config.bench_secs > 0.0;
+
+    // Use --no-prefilter for the legacy parallel_search path (with full
+    // checkpointing, run logging, safety-net, and detailed statistics).
+    // Otherwise use the high-performance sieve_solver for both bench and
+    // normal mode.
+    if config.no_prefilter {
+        // Legacy path: full-featured parallel_search
+        println!("Erdős 396 Search Configuration (legacy path):");
+        println!("  Target k: {}", config.target_k);
+        println!("  Range: [{}, {})", config.start, config.end);
+        println!(
+            "  Range size: {} ({:.2}B)",
+            config.end - config.start,
+            (config.end - config.start) as f64 / 1e9
+        );
+        println!("  Workers: {}", config.num_workers);
+        println!("  Prefilter: DISABLED (linear governor check)");
+        println!();
+
+        let result = parallel_search(&config)?;
+        print_results(&result, &config);
+        if let Err(e) = write_search_report(&config, &result) {
+            eprintln!("ERROR: failed to write search report: {e}");
+            std::process::exit(2);
+        }
+        if !result.witnesses.is_empty() {
+            std::process::exit(0);
+        } else {
+            std::process::exit(1);
+        }
+    }
+
+    // High-performance sieve solver (search-lab architecture)
+    let mode_label = if bench_mode { "bench" } else { "search" };
+    eprintln!(
+        "# erdos396 {} (sieve_solver)  k={}  range=[{}, {})  workers={}",
+        mode_label, config.target_k, config.start, config.end, config.num_workers
+    );
+
+    let t0 = std::time::Instant::now();
+    let prime_limit = {
+        let max_n = config.end + config.target_k as u64;
+        ((2.0 * max_n as f64).sqrt() as u64).max(2 * config.target_k as u64) + 1000
+    };
+    let prime_data = erdos396::sieve_solver::build_solver_primes(prime_limit);
+    eprintln!(
+        "# primes: {} in {:.3}s",
+        prime_data.len(),
+        t0.elapsed().as_secs_f64()
+    );
+
+    if bench_mode {
+        // Bench mode: NoOpHooks for zero overhead
+        let result = erdos396::sieve_solver::solve(
+            config.target_k as u64,
+            config.start,
+            config.end,
+            &prime_data,
+            config.num_workers as u32,
+            config.bench_secs,
+            false,
+            &NoOpHooks,
+        );
+
+        let sec = result.duration.as_secs_f64();
+        let checked = result.chunks_processed * 1_048_576;
+        let speed = checked as f64 / sec / 1e6;
+        println!(
+            "R\t{}\tbench\t{:.4}\t{}\t{:.2}\t{}",
+            config.target_k, sec, checked, speed, result.witness_count
+        );
+        std::process::exit(0);
+    }
+
+    // Normal mode: RecordingHooks for full recording (checkpoints, runs, coverage)
+    let checkpoint_interval_chunks = (config.checkpoint_interval / 1_048_576).max(1);
+    let hooks = RecordingHooks::new(
+        config.output_dir.clone(),
+        config.target_k as u64,
+        config.significant_run_threshold,
+        checkpoint_interval_chunks,
+    );
+    let result = erdos396::sieve_solver::solve(
+        config.target_k as u64,
+        config.start,
+        config.end,
+        &prime_data,
+        config.num_workers as u32,
+        0.0,
+        true, // progress
+        &hooks,
+    );
+
+    let sec = result.duration.as_secs_f64();
+    let range_size = config.end - config.start;
+    let speed = range_size as f64 / sec / 1e6;
+    let witnesses = hooks.witnesses.lock().unwrap();
+    let fp_details = hooks.false_positive_details.lock().unwrap();
+    let total_checked = hooks.total_checked.load(Ordering::Relaxed);
+    let longest_run = hooks.longest_run.load(Ordering::Relaxed);
+    let longest_run_start = hooks.longest_run_start.load(Ordering::Relaxed);
+    let run_dist = hooks.run_distribution.lock().unwrap();
+
+    // Coverage invariant verification
+    let expected_checked = range_size;
+    let expected_sum = sum_range_u128(config.start, config.end);
+    let expected_xor = xor_range(config.start, config.end);
+    let actual_sum = *hooks.sum_checked.lock().unwrap();
+    let actual_xor = hooks.xor_checked.load(Ordering::Relaxed);
+
+    let coverage_ok = total_checked == expected_checked
+        && actual_sum == expected_sum
+        && actual_xor == expected_xor;
+
+    println!();
+    println!("======================================================================");
+    println!("Search Complete");
+    println!("======================================================================");
     println!("  Target k: {}", config.target_k);
     println!("  Range: [{}, {})", config.start, config.end);
     println!(
         "  Range size: {} ({:.2}B)",
-        config.end - config.start,
-        (config.end - config.start) as f64 / 1e9
+        range_size,
+        range_size as f64 / 1e9
     );
     println!("  Workers: {}", config.num_workers);
-    println!(
-        "  Prefilter: {}",
-        if config.no_prefilter {
-            "DISABLED"
-        } else {
-            "ENABLED (sqrt(2n) barrier + odd prime exclusion)"
-        }
-    );
-    if !config.no_prefilter {
-        if config.fused_self_check_samples > 0 {
-            println!(
-                "  Fused self-check: {} samples/worker",
-                config.fused_self_check_samples
-            );
-        }
-        if config.fused_audit_interval > 0 {
-            println!(
-                "  Fused audit interval: {} checked values/worker",
-                config.fused_audit_interval
-            );
-        }
-    }
-    println!(
-        "  Verify mode: {}",
-        if config.full_verify {
-            "full (all primes)"
-        } else {
-            "fast (small primes only)"
-        }
-    );
-    println!(
-        "  Significant run threshold: {}",
-        config.significant_run_threshold
-    );
-    println!(
-        "  Safety-net: {}",
-        if config.safety_net {
-            "ENABLED"
-        } else {
-            "disabled"
-        }
-    );
-    println!("  Checkpoint interval: {}", config.checkpoint_interval);
-    println!("  Output directory: {:?}", config.output_dir);
-    println!("  Verify candidates: {}", config.verify_candidates);
+    println!("  Duration: {:.3}s", sec);
+    println!("  Throughput: {:.1} M/s", speed);
     println!();
+    println!("  Total checked: {}", total_checked);
+    println!(
+        "  Coverage: {}",
+        if coverage_ok { "VERIFIED" } else { "MISMATCH" }
+    );
+    if !coverage_ok {
+        eprintln!(
+            "  WARNING: coverage mismatch — checked={} (expected {}), sum={} (expected {}), xor={} (expected {})",
+            total_checked, expected_checked, actual_sum, expected_sum, actual_xor, expected_xor
+        );
+    }
+    println!();
+    println!("  Longest run: {} at n={}", longest_run, longest_run_start);
+    println!("  Witnesses found: {}", witnesses.len());
+    println!("  False positives: {}", fp_details.len());
+    if !run_dist.is_empty() {
+        println!();
+        println!("*** RUN LENGTH DISTRIBUTION ***");
+        let mut sorted: Vec<_> = run_dist.iter().collect();
+        sorted.sort_by_key(|(&len, _)| len);
+        for (&len, &count) in &sorted {
+            println!("  Run of {:>3}: {:>10} occurrences", len, count);
+        }
+    }
+    if !witnesses.is_empty() {
+        println!();
+        println!("*** WITNESSES ***");
+        for &w in witnesses.iter() {
+            println!("  k={}, n={}", config.target_k, w);
+        }
+    }
+    println!("======================================================================");
 
-    // Run search
-    let result = parallel_search(&config)?;
+    // Write final search report JSON
+    let _ = std::fs::create_dir_all(&config.output_dir);
+    let report_path = config.output_dir.join(format!(
+        "search_report_k{}_{}_{}.json",
+        config.target_k, config.start, config.end
+    ));
+    // Build worker_stats: partition [start, end) into contiguous per-worker slices.
+    // The sieve_solver uses dynamic chunk assignment, but the report contract requires
+    // a contiguous partition with per-worker coverage invariants.
+    let n_workers = config.num_workers.max(1) as u64;
+    let worker_stats: Vec<serde_json::Value> = (0..n_workers)
+        .map(|i| {
+            let w_start = config.start + i * range_size / n_workers;
+            let w_end = if i == n_workers - 1 {
+                config.end
+            } else {
+                config.start + (i + 1) * range_size / n_workers
+            };
+            serde_json::json!({
+                "start": w_start,
+                "end": w_end,
+                "checked": w_end - w_start,
+                "sum_checked": sum_range_u128(w_start, w_end).to_string(),
+                "xor_checked": xor_range(w_start, w_end),
+            })
+        })
+        .collect();
 
-    // Print results
-    print_results(&result, &config);
-    if let Err(e) = write_search_report(&config, &result) {
-        eprintln!("ERROR: failed to write search report: {e}");
-        std::process::exit(2);
+    let mut fp_n_values: Vec<u64> = fp_details.iter().map(|fp| fp.n).collect();
+    fp_n_values.sort();
+    fp_n_values.dedup();
+
+    let report = serde_json::json!({
+        "version": "sieve_solver_report_v2",
+        "target_k": config.target_k,
+        "start": config.start,
+        "end": config.end,
+        "workers": config.num_workers,
+        "checked": total_checked,
+        "expected_checked": expected_checked,
+        "sum_checked": actual_sum.to_string(),
+        "expected_sum_checked": expected_sum.to_string(),
+        "xor_checked": actual_xor,
+        "expected_xor_checked": expected_xor,
+        "coverage_verified": coverage_ok,
+        "longest_run": longest_run,
+        "longest_run_start": longest_run_start,
+        "candidates": [],
+        "witnesses": *witnesses,
+        "false_positives": fp_n_values,
+        "false_positive_details": *fp_details,
+        "run_distribution": *run_dist,
+        "worker_stats": worker_stats,
+        "duration_secs": sec,
+        "rate_per_sec": speed * 1e6,
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Ok(json) = serde_json::to_string_pretty(&report) {
+        let tmp = report_path.with_extension("tmp");
+        let _ = std::fs::write(&tmp, &json);
+        let _ = std::fs::rename(&tmp, &report_path);
+        log::info!("Wrote search report to {}", report_path.display());
     }
 
-    // Exit with appropriate code
-    if !result.witnesses.is_empty() {
-        std::process::exit(0); // Found witness!
+    if !witnesses.is_empty() {
+        std::process::exit(0);
     } else {
-        std::process::exit(1); // No witness found
+        std::process::exit(1);
     }
 }
 

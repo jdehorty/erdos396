@@ -6,6 +6,74 @@
 use crate::int_math::isqrt_u64;
 use std::sync::Arc;
 
+// ---------------------------------------------------------------------------
+// PrimeData — precomputed per-prime data for fast modular arithmetic
+// ---------------------------------------------------------------------------
+
+/// Precomputed per-prime data for fast modular arithmetic.
+///
+/// Hot fields (inv_p, max_quot) are first so they share a cache line
+/// during the inner strip loop.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct PrimeData {
+    /// Modular inverse of p mod 2^64 (for odd p). Used for:
+    /// - Divisibility test: `n.wrapping_mul(inv_p) <= max_quot` iff `p | n`
+    /// - Exact division: `n / p == n.wrapping_mul(inv_p)` when `p | n`
+    pub inv_p: u64,
+    /// `u64::MAX / p` — divisibility threshold for the inverse test.
+    pub max_quot: u64,
+    /// Barrett magic constant: `ceil(2^(64+shift) / p)`. Used once per
+    /// prime per batch to compute the first multiple of p in the batch
+    /// without hardware division.
+    pub magic: u64,
+    /// The prime value (full u64 to support sieve limits above 2^32).
+    pub p: u64,
+    /// `bit_width(p) - 1` — Barrett shift amount.
+    pub shift: u8,
+}
+
+/// Compute modular inverse of odd `n` mod 2^64 via Newton's method.
+///
+/// After 5 Newton iterations starting from a 4-bit-accurate seed,
+/// the result is exact mod 2^64.
+#[inline(always)]
+pub fn mod_inverse_u64(n: u64) -> u64 {
+    debug_assert!(n & 1 == 1, "mod_inverse_u64 requires odd input");
+    let mut inv = n.wrapping_mul(3) ^ 2; // correct mod 2^4
+    inv = inv.wrapping_mul(2u64.wrapping_sub(n.wrapping_mul(inv)));
+    inv = inv.wrapping_mul(2u64.wrapping_sub(n.wrapping_mul(inv)));
+    inv = inv.wrapping_mul(2u64.wrapping_sub(n.wrapping_mul(inv)));
+    inv = inv.wrapping_mul(2u64.wrapping_sub(n.wrapping_mul(inv)));
+    inv
+}
+
+/// Build `PrimeData` array from a slice of primes.
+///
+/// Precomputes modular inverse, Barrett magic, and divisibility
+/// threshold for each prime. Called once at startup.
+pub fn build_prime_data(primes: &[u64]) -> Vec<PrimeData> {
+    primes
+        .iter()
+        .map(|&p| {
+            let inv_p = if p % 2 != 0 { mod_inverse_u64(p) } else { 0 };
+            let shift = (64 - p.leading_zeros()).saturating_sub(1) as u8;
+            let magic = if p > 1 {
+                (((1u128 << (64 + shift as u32)) / p as u128) + 1) as u64
+            } else {
+                0
+            };
+            PrimeData {
+                inv_p,
+                max_quot: u64::MAX / p,
+                magic,
+                p,
+                shift,
+            }
+        })
+        .collect()
+}
+
 /// A precomputed prime sieve for fast factorization.
 ///
 /// The sieve stores all primes up to `limit` in a contiguous Vec for
@@ -183,5 +251,79 @@ mod tests {
         let sieve = PrimeSieve::for_range(1_000_000_000);
         assert!(sieve.can_factor(1_000_000_000));
         assert!(sieve.limit() >= 31623); // sqrt(10^9) ≈ 31623
+    }
+
+    #[test]
+    fn test_mod_inverse_u64() {
+        // For odd prime p, p * mod_inverse(p) ≡ 1 (mod 2^64)
+        for &p in &[3u64, 5, 7, 11, 13, 97, 997, 7919, 104729] {
+            let inv = super::mod_inverse_u64(p);
+            assert_eq!(p.wrapping_mul(inv), 1u64, "inverse failed for p={}", p);
+        }
+    }
+
+    #[test]
+    fn test_prime_data_divisibility() {
+        // n.wrapping_mul(inv_p) <= max_quot  iff  p | n
+        let p = 7u64;
+        let inv = super::mod_inverse_u64(p);
+        let max_quot = u64::MAX / p;
+
+        // Multiples of 7
+        for m in 1..=1000u64 {
+            let n = m * p;
+            assert!(
+                n.wrapping_mul(inv) <= max_quot,
+                "false negative: {} should be divisible by {}",
+                n,
+                p
+            );
+        }
+        // Non-multiples of 7
+        for n in 1..=100u64 {
+            if n % p != 0 {
+                assert!(
+                    n.wrapping_mul(inv) > max_quot,
+                    "false positive: {} should NOT be divisible by {}",
+                    n,
+                    p
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_prime_data_exact_division() {
+        // When p | n: n / p == n.wrapping_mul(inv_p)
+        let p = 13u64;
+        let inv = super::mod_inverse_u64(p);
+        for m in 1..=10_000u64 {
+            let n = m * p;
+            let quot = n.wrapping_mul(inv);
+            assert_eq!(
+                quot, m,
+                "exact division failed: {} / {} should be {}, got {}",
+                n, p, m, quot
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_prime_data_roundtrip() {
+        let sieve = PrimeSieve::new(1000);
+        let pd = super::build_prime_data(sieve.primes());
+        assert_eq!(pd.len(), sieve.len());
+        for (i, d) in pd.iter().enumerate() {
+            assert_eq!(d.p, sieve.primes()[i]);
+            if d.p > 2 {
+                assert_eq!(
+                    d.p.wrapping_mul(d.inv_p),
+                    1u64,
+                    "inverse check failed for p={}",
+                    d.p
+                );
+                assert_eq!(d.max_quot, u64::MAX / d.p);
+            }
+        }
     }
 }

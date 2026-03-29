@@ -25,6 +25,7 @@ pub mod prefilter;
 pub mod run_collection;
 pub mod search;
 pub mod sieve;
+pub mod sieve_solver;
 pub mod verify;
 
 // Re-export main types for convenience
@@ -40,7 +41,7 @@ pub use run_collection::{
     build_run_corpus, BuildRunCorpusConfig, BuildRunCorpusStats, RunRecord, RunWindowRecord,
 };
 pub use search::{SearchConfig, SearchResult, SearchWorker};
-pub use sieve::PrimeSieve;
+pub use sieve::{build_prime_data, PrimeData, PrimeSieve};
 pub use verify::WitnessVerifier;
 
 /// Known OEIS A375077 witnesses for verification

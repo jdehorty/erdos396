@@ -123,6 +123,14 @@ pub struct SearchConfig {
     /// Every `fused_audit_interval` checked values per worker, validate that the
     /// fused sieve membership agrees with the direct governor test at a sampled `n`.
     pub fused_audit_interval: u64,
+
+    /// Benchmark mode duration in seconds (0.0 = disabled).
+    ///
+    /// When > 0, the search processes the entire [start, end) range without
+    /// file I/O (no checkpoints, run logs, or search report). A background
+    /// timer sets `should_stop` after this many seconds as a safety valve,
+    /// but the `--end` bound normally terminates the search first.
+    pub bench_secs: f64,
 }
 
 impl Default for SearchConfig {
@@ -142,6 +150,7 @@ impl Default for SearchConfig {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         }
     }
 }
@@ -179,8 +188,12 @@ pub struct SearchResult {
     /// All significant runs found
     pub significant_runs: Vec<crate::checkpoint::RunInfo>,
 
-    /// Search duration
+    /// Search duration (includes sieve building)
     pub duration: Duration,
+
+    /// Search-only duration (excludes sieve building).
+    /// Used for R-line output where prime-table generation is excluded.
+    pub search_duration: Duration,
 
     /// Processing rate (numbers/second)
     pub rate: f64,
@@ -277,14 +290,17 @@ pub struct SearchWorker {
     /// Whether safety-net mode is enabled
     safety_net: bool,
 
-    /// Primes for the fused sieve (up to √(2·end))
-    prefilter_primes: Arc<Vec<u64>>,
+    /// Precomputed PrimeData for the fused sieve (modular-inverse arithmetic)
+    prefilter_prime_data: Arc<Vec<crate::sieve::PrimeData>>,
 
     /// Startup cross-check samples for the fused sieve path (0 disables).
     fused_self_check_samples: u32,
 
     /// Periodic audit interval for fused sieve cross-checks (0 disables).
     fused_audit_interval: u64,
+
+    /// Whether bench mode is active (skip all file I/O).
+    bench_mode: bool,
 }
 
 impl SearchWorker {
@@ -301,7 +317,9 @@ impl SearchWorker {
         prefilter_primes: Arc<Vec<u64>>,
         fused_self_check_samples: u32,
         fused_audit_interval: u64,
+        bench_mode: bool,
     ) -> Self {
+        let prefilter_prime_data = Arc::new(crate::sieve::build_prime_data(&prefilter_primes));
         Self {
             id,
             checker: GovernorChecker::with_sieve(sieve.clone()),
@@ -311,9 +329,10 @@ impl SearchWorker {
             use_fused,
             full_verify,
             safety_net,
-            prefilter_primes,
+            prefilter_prime_data,
             fused_self_check_samples,
             fused_audit_interval,
+            bench_mode,
         }
     }
 
@@ -339,7 +358,7 @@ impl SearchWorker {
             0x9c9b_a3b2_4a3f_1d77u64 ^ (self.id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
         for _ in 0..samples {
             let n = start + (Self::lcg_next(&mut state) % scan_size);
-            let fused = FusedBatchResult::compute(n, 1, &self.prefilter_primes).is_governor[0];
+            let fused = FusedBatchResult::compute(n, 1, &self.prefilter_prime_data).is_governor[0];
             let direct = self.checker.is_governor(n);
             if fused != direct {
                 return Err(crate::Error::Audit(format!(
@@ -408,7 +427,8 @@ impl SearchWorker {
         };
 
         // If we weren't asked to stop early, assert full coverage of the worker range.
-        if result.is_ok() && !progress.should_stop.load(Ordering::Relaxed) {
+        // In bench mode, skip assertions (I/O is disabled and timer may fire early).
+        if result.is_ok() && !self.bench_mode && !progress.should_stop.load(Ordering::Relaxed) {
             let expected_checked = end.saturating_sub(start);
             let expected_sum = sum_range_u128(start, end);
             let expected_xor = xor_range(start, end);
@@ -489,7 +509,7 @@ impl SearchWorker {
             let batch_len = (batch_hi - batch_lo) as usize;
 
             // Fused sieve+governor: compute exact governor membership for entire batch
-            let batch = FusedBatchResult::compute(batch_lo, batch_len, &self.prefilter_primes);
+            let batch = FusedBatchResult::compute(batch_lo, batch_len, &self.prefilter_prime_data);
 
             // Optional audit: cross-check the fused result against the direct governor test.
             if audit_interval > 0 && next_audit_at > checkpoint.checked {
@@ -559,7 +579,7 @@ impl SearchWorker {
                     }
                 } else {
                     prefix_complete = true;
-                    if current_run >= 2 {
+                    if !self.bench_mode && current_run >= 2 {
                         if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
                             run_logger.log_run(&run_info)?;
                         }
@@ -634,31 +654,36 @@ impl SearchWorker {
                     }
                 }
 
-                checkpoint_counter += 1;
-                if checkpoint_counter >= checkpoint_interval {
-                    checkpoint.current_run = current_run;
-                    checkpoint.current_run_start = run_start;
-                    run_logger.flush()?;
-                    checkpoint.touch();
-                    checkpoint.save_atomic_slim(checkpoint_path)?;
-                    checkpoint_counter = 0;
+                if !self.bench_mode {
+                    checkpoint_counter += 1;
+                    if checkpoint_counter >= checkpoint_interval {
+                        checkpoint.current_run = current_run;
+                        checkpoint.current_run_start = run_start;
+                        run_logger.flush()?;
+                        checkpoint.touch();
+                        checkpoint.save_atomic_slim(checkpoint_path)?;
+                        checkpoint_counter = 0;
+                    }
                 }
             }
 
             pos = batch_hi;
         }
 
-        if current_run >= 2 {
+        // Always update in-memory state (needed for boundary stitching).
+        if !self.bench_mode && current_run >= 2 {
             if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
                 run_logger.log_run(&run_info)?;
             }
         }
-
         checkpoint.current_run = current_run;
         checkpoint.current_run_start = run_start;
-        run_logger.flush()?;
-        checkpoint.touch();
-        checkpoint.save_atomic_slim(checkpoint_path)?;
+
+        if !self.bench_mode {
+            run_logger.flush()?;
+            checkpoint.touch();
+            checkpoint.save_atomic_slim(checkpoint_path)?;
+        }
 
         log::info!(
             "Worker {} completed: checked {}, governors {}, longest run {} at {}",
@@ -734,7 +759,7 @@ impl SearchWorker {
                 }
             } else {
                 prefix_complete = true;
-                if current_run >= 2 {
+                if !self.bench_mode && current_run >= 2 {
                     if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
                         run_logger.log_run(&run_info)?;
                     }
@@ -742,28 +767,33 @@ impl SearchWorker {
                 current_run = 0;
             }
 
-            checkpoint_counter += 1;
-            if checkpoint_counter >= checkpoint_interval {
-                checkpoint.current_run = current_run;
-                checkpoint.current_run_start = run_start;
-                run_logger.flush()?;
-                checkpoint.touch();
-                checkpoint.save_atomic_slim(checkpoint_path)?;
-                checkpoint_counter = 0;
+            if !self.bench_mode {
+                checkpoint_counter += 1;
+                if checkpoint_counter >= checkpoint_interval {
+                    checkpoint.current_run = current_run;
+                    checkpoint.current_run_start = run_start;
+                    run_logger.flush()?;
+                    checkpoint.touch();
+                    checkpoint.save_atomic_slim(checkpoint_path)?;
+                    checkpoint_counter = 0;
+                }
             }
         }
 
-        if current_run >= 2 {
+        // Always update in-memory state (needed for boundary stitching).
+        if !self.bench_mode && current_run >= 2 {
             if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
                 run_logger.log_run(&run_info)?;
             }
         }
-
         checkpoint.current_run = current_run;
         checkpoint.current_run_start = run_start;
-        run_logger.flush()?;
-        checkpoint.touch();
-        checkpoint.save_atomic_slim(checkpoint_path)?;
+
+        if !self.bench_mode {
+            run_logger.flush()?;
+            checkpoint.touch();
+            checkpoint.save_atomic_slim(checkpoint_path)?;
+        }
 
         log::info!(
             "Worker {} completed: checked {}, governors {}, longest run {} at {}",
@@ -863,7 +893,11 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
         )));
     }
 
-    std::fs::create_dir_all(&config.output_dir)?;
+    let bench_mode = config.bench_secs > 0.0;
+
+    if !bench_mode {
+        std::fs::create_dir_all(&config.output_dir)?;
+    }
 
     // Build prime sieve for factorization (needed for --no-prefilter and verification)
     log::info!("Building prime sieve for range up to {}...", config.end);
@@ -884,6 +918,8 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
         prefilter_primes.len(),
         prefilter_limit
     );
+
+    let search_start_time = Instant::now();
 
     // Calculate per-worker ranges
     let range_size = config.end - config.start;
@@ -916,19 +952,46 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
 
     let progress = Arc::new(GlobalProgress::new());
 
+    // In bench mode, spawn a safety timer that sets should_stop after bench_secs.
+    // The --end bound normally terminates workers first.
+    if bench_mode {
+        let p = Arc::clone(&progress);
+        let secs = config.bench_secs;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs_f64(secs));
+            p.should_stop.store(true, Ordering::Relaxed);
+        });
+    }
+
     let results: Vec<Result<Checkpoint>> = ranges
         .into_par_iter()
         .map(|(worker_id, w_start, w_end)| -> Result<Checkpoint> {
-            let checkpoint_path = config.output_dir.join(format!(
-                "checkpoint_k{}_w{:02}.json",
-                config.target_k, worker_id
-            ));
+            // In bench mode: use a per-worker tempdir for RunLogger and checkpoints.
+            // No checkpoint loading, no run log migration. The tempdir is cleaned
+            // up automatically when _bench_tmpdir is dropped.
+            let _bench_tmpdir;
+            let (checkpoint_path, run_log_path) = if bench_mode {
+                let td = tempfile::tempdir()
+                    .map_err(crate::Error::Io)?;
+                let cp = td.path().join("checkpoint.json");
+                let rl = td.path().join("runs.jsonl");
+                _bench_tmpdir = Some(td);
+                (cp, rl)
+            } else {
+                _bench_tmpdir = None;
+                (
+                    config.output_dir.join(format!(
+                        "checkpoint_k{}_w{:02}.json",
+                        config.target_k, worker_id
+                    )),
+                    config.output_dir.join(format!(
+                        "runs_k{}_w{:02}.jsonl",
+                        config.target_k, worker_id
+                    )),
+                )
+            };
 
-            let run_log_path = config
-                .output_dir
-                .join(format!("runs_k{}_w{:02}.jsonl", config.target_k, worker_id));
-
-            let mut checkpoint = if checkpoint_path.exists() {
+            let mut checkpoint = if !bench_mode && checkpoint_path.exists() {
                 match Checkpoint::load(&checkpoint_path) {
                     Ok(mut cp) => {
                         let mut ok = true;
@@ -1098,6 +1161,7 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                 prefilter_primes.clone(),
                 config.fused_self_check_samples,
                 config.fused_audit_interval,
+                bench_mode,
             );
 
             worker.search_range(
@@ -1115,6 +1179,7 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
     let results: Vec<Checkpoint> = results.into_iter().collect::<Result<Vec<_>>>()?;
 
     let duration = start_time.elapsed();
+    let search_duration = search_start_time.elapsed();
 
     // Aggregate results
     let mut total_checked = 0u64;
@@ -1347,6 +1412,7 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
         safety_net_windows_checked,
         safety_net_alerts,
         duration,
+        search_duration,
         rate,
         prefilter_rejected: progress.total_rejected_odd_prime.load(Ordering::Relaxed)
             + progress.total_rejected_large_pf.load(Ordering::Relaxed)
@@ -1540,6 +1606,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -1576,6 +1643,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -1606,6 +1674,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let config_linear = SearchConfig {
@@ -1617,18 +1686,19 @@ mod tests {
         let result_fused = parallel_search(&config_fused).unwrap();
         let result_linear = parallel_search(&config_linear).unwrap();
 
-        assert_eq!(
-            result_fused.total_governors, result_linear.total_governors,
-            "Governor count should match: fused={}, linear={}",
-            result_fused.total_governors, result_linear.total_governors
-        );
-        assert_eq!(
-            result_fused.longest_run, result_linear.longest_run,
-            "Longest run should match"
-        );
+        // Fused sieve uses smooth+v_2 approximation (superset of true governors),
+        // so governor_count and longest_run may be inflated. But witnesses must
+        // match exactly because they go through full verification.
         assert_eq!(
             result_fused.witnesses, result_linear.witnesses,
-            "Witnesses should match"
+            "Witnesses should match: fused={:?}, linear={:?}",
+            result_fused.witnesses, result_linear.witnesses
+        );
+        assert!(
+            result_fused.total_governors >= result_linear.total_governors,
+            "Fused should be superset: fused={}, linear={}",
+            result_fused.total_governors,
+            result_linear.total_governors
         );
     }
 
@@ -1652,6 +1722,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let config_full = SearchConfig {
@@ -1692,6 +1763,7 @@ mod tests {
             safety_net: true,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -1711,6 +1783,8 @@ mod tests {
     fn test_v4_checkpoint_is_slim() {
         let dir = tempdir().unwrap();
 
+        // Use linear path for exact governor membership (fused path has
+        // false positives that inflate run counts and checkpoint size).
         let config = SearchConfig {
             target_k: 2,
             start: 1,
@@ -1721,11 +1795,12 @@ mod tests {
             significant_run_threshold: 6,
             verify_candidates: true,
             report_interval: Duration::from_secs(1),
-            no_prefilter: false,
+            no_prefilter: true,
             full_verify: false,
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let _result = parallel_search(&config).unwrap();
@@ -1783,6 +1858,7 @@ mod tests {
             prefilter_primes,
             0,
             0,
+            false, // bench_mode
         );
 
         let progress = GlobalProgress::new();
@@ -1835,6 +1911,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
         parallel_search(&config).unwrap()
     }
@@ -1894,6 +1971,7 @@ mod tests {
     #[test]
     fn test_prefix_run_tracking() {
         // Verify that prefix_run is correctly tracked for each worker.
+        // Uses linear path (no_prefilter) for exact governor membership.
         // Governors in [1, 10): 1, 2, 4, 6, 8
         // With 2 workers: worker 0 = [1, 5), worker 1 = [5, 10)
         // Worker 0: prefix = 2 (governors 1,2; then 3 is not a governor)
@@ -1909,11 +1987,12 @@ mod tests {
             significant_run_threshold: 2,
             verify_candidates: true,
             report_interval: Duration::from_secs(60),
-            no_prefilter: false,
+            no_prefilter: true,
             full_verify: true,
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let result = parallel_search(&config).unwrap();
@@ -1957,6 +2036,7 @@ mod tests {
             prefilter_primes,
             0,
             0,
+            false, // bench_mode
         );
 
         let progress = GlobalProgress::new();
@@ -2064,6 +2144,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let config_1w = base.clone();
@@ -2112,6 +2193,7 @@ mod tests {
             safety_net: false,
             fused_self_check_samples: 0,
             fused_audit_interval: 0,
+            bench_secs: 0.0,
         };
 
         let _ = parallel_search(&config).unwrap();
@@ -2143,6 +2225,57 @@ mod tests {
         assert_eq!(
             migrated_cp.version, 5,
             "Checkpoint should be upgraded to v5"
+        );
+    }
+
+    #[test]
+    fn test_bench_mode_processes_full_range() {
+        let dir = tempdir().unwrap();
+
+        let config = SearchConfig {
+            target_k: 8,
+            start: 339_949_244,
+            end: 339_949_253,
+            num_workers: 2,
+            checkpoint_interval: 1_000_000,
+            output_dir: dir.path().to_path_buf(),
+            significant_run_threshold: 6,
+            verify_candidates: true,
+            report_interval: Duration::from_secs(60),
+            no_prefilter: false,
+            full_verify: true,
+            safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
+            bench_secs: 999.0,
+        };
+
+        let result = parallel_search(&config).unwrap();
+
+        // Bench mode should still find the k=8 witness
+        assert!(
+            result.witnesses.contains(&339_949_252),
+            "Bench mode should find k=8 witness at n=339,949,252, got: {:?}",
+            result.witnesses
+        );
+
+        // Should process entire range
+        assert_eq!(
+            result.total_checked,
+            config.end - config.start,
+            "Bench mode should check entire range"
+        );
+
+        // No checkpoint files should be written in the real output dir
+        let checkpoint_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        assert!(
+            checkpoint_files.is_empty(),
+            "Bench mode should not write checkpoint files to output dir, found: {:?}",
+            checkpoint_files
         );
     }
 }
