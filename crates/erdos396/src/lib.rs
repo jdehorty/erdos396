@@ -40,7 +40,7 @@ pub use run_collection::{
     build_run_corpus, BuildRunCorpusConfig, BuildRunCorpusStats, RunRecord, RunWindowRecord,
 };
 pub use search::{SearchConfig, SearchResult, SearchWorker};
-pub use sieve::PrimeSieve;
+pub use sieve::{build_prime_data, PrimeData, PrimeSieve};
 pub use verify::WitnessVerifier;
 
 /// Known OEIS A375077 witnesses for verification

@@ -293,6 +293,9 @@ pub struct SearchWorker {
     /// Primes for the fused sieve (up to √(2·end))
     prefilter_primes: Arc<Vec<u64>>,
 
+    /// Precomputed PrimeData for the fused sieve (modular-inverse arithmetic)
+    prefilter_prime_data: Arc<Vec<crate::sieve::PrimeData>>,
+
     /// Startup cross-check samples for the fused sieve path (0 disables).
     fused_self_check_samples: u32,
 
@@ -319,6 +322,8 @@ impl SearchWorker {
         fused_audit_interval: u64,
         bench_mode: bool,
     ) -> Self {
+        let prefilter_prime_data =
+            Arc::new(crate::sieve::build_prime_data(&prefilter_primes));
         Self {
             id,
             checker: GovernorChecker::with_sieve(sieve.clone()),
@@ -329,6 +334,7 @@ impl SearchWorker {
             full_verify,
             safety_net,
             prefilter_primes,
+            prefilter_prime_data,
             fused_self_check_samples,
             fused_audit_interval,
             bench_mode,
@@ -357,7 +363,7 @@ impl SearchWorker {
             0x9c9b_a3b2_4a3f_1d77u64 ^ (self.id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
         for _ in 0..samples {
             let n = start + (Self::lcg_next(&mut state) % scan_size);
-            let fused = FusedBatchResult::compute(n, 1, &self.prefilter_primes).is_governor[0];
+            let fused = FusedBatchResult::compute(n, 1, &self.prefilter_prime_data).is_governor[0];
             let direct = self.checker.is_governor(n);
             if fused != direct {
                 return Err(crate::Error::Audit(format!(
@@ -508,7 +514,7 @@ impl SearchWorker {
             let batch_len = (batch_hi - batch_lo) as usize;
 
             // Fused sieve+governor: compute exact governor membership for entire batch
-            let batch = FusedBatchResult::compute(batch_lo, batch_len, &self.prefilter_primes);
+            let batch = FusedBatchResult::compute(batch_lo, batch_len, &self.prefilter_prime_data);
 
             // Optional audit: cross-check the fused result against the direct governor test.
             if audit_interval > 0 && next_audit_at > checkpoint.checked {

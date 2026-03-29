@@ -16,6 +16,7 @@
 
 use crate::governor::vp_central_binom_dispatch;
 use crate::int_math::isqrt_u128;
+use crate::sieve::{build_prime_data, PrimeData};
 
 /// Fused batch result: exact governor membership computed in a single sieve pass.
 ///
@@ -39,20 +40,123 @@ pub struct FusedBatchResult {
     pub rejected_vp_fail: usize,
 }
 
+/// Sub-block size for L1 cache residency (32K elements × 8 bytes = 256KB).
+const BLOCK_SIZE: usize = 32_768;
+
+// ---------------------------------------------------------------------------
+// Const-generic prime factor stripping (compile-time constant multiplication)
+// ---------------------------------------------------------------------------
+
+/// Strip all factors of compile-time-constant prime P from `remaining`,
+/// returning the exponent. Returns 0 if P does not divide `*remaining`.
+#[inline(always)]
+fn strip_prime_const<const P: u64>(remaining: &mut u64) -> u32 {
+    const fn inv_const(p: u64) -> u64 {
+        let mut inv = p.wrapping_mul(3) ^ 2;
+        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
+        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
+        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
+        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
+        inv
+    }
+    const fn limit_const(p: u64) -> u64 {
+        u64::MAX / p
+    }
+
+    let inv = inv_const(P);
+    let limit = limit_const(P);
+
+    let q = remaining.wrapping_mul(inv);
+    if q > limit {
+        return 0;
+    }
+
+    *remaining = q;
+    let mut exp = 1u32;
+    loop {
+        let q2 = remaining.wrapping_mul(inv);
+        if q2 > limit {
+            break;
+        }
+        *remaining = q2;
+        exp += 1;
+    }
+    exp
+}
+
+/// Strip all factors of runtime prime using precomputed PrimeData.
+/// Returns exponent (0 if prime does not divide `*remaining`).
+#[inline(always)]
+fn strip_prime_dyn(remaining: &mut u64, inv_p: u64, max_quot: u64) -> u32 {
+    let q = remaining.wrapping_mul(inv_p);
+    if q > max_quot {
+        return 0;
+    }
+
+    *remaining = q;
+    let mut exp = 1u32;
+    loop {
+        let q2 = remaining.wrapping_mul(inv_p);
+        if q2 > max_quot {
+            break;
+        }
+        *remaining = q2;
+        exp += 1;
+    }
+    exp
+}
+
+macro_rules! dispatch_strip {
+    ($remaining:expr, $pd:expr, [$($prime:literal),* $(,)?]) => {
+        match $pd.p as u64 {
+            $($prime => strip_prime_const::<$prime>($remaining),)*
+            _ => strip_prime_dyn($remaining, $pd.inv_p, $pd.max_quot),
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Bucketed large-prime processing
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct BucketItem {
+    pd_idx: u32,
+    offset: u32,
+}
+
+struct PrimeBucket {
+    items: Vec<BucketItem>,
+}
+
+impl PrimeBucket {
+    fn new() -> Self {
+        PrimeBucket {
+            items: Vec::with_capacity(256),
+        }
+    }
+
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    #[inline(always)]
+    fn push(&mut self, pd_idx: u32, offset: u32) {
+        self.items.push(BucketItem { pd_idx, offset });
+    }
+}
+
 impl FusedBatchResult {
     /// Compute exact governor membership for every number in [lo, lo + len).
     ///
-    /// Algorithm:
-    /// 1. Initialize remaining\[i\] = lo + i
-    /// 2. For each prime p ≤ sieve_limit:
-    ///    - Visit multiples of p in the batch (amortized O(batch/p) per prime)
-    ///    - Divide out all factors of p, recording exponent
-    ///    - Check v_p(C(2n,n)) ≥ exponent inline; reject on failure
-    ///    - Skip already-rejected numbers entirely (saves division work)
-    /// 3. After sieve: remaining\[i\] > 1 means large prime factor → reject
+    /// Uses modular-inverse arithmetic for divisibility testing and exact
+    /// division (~3 cycles per wrapping_mul vs ~35 cycles for hardware div).
+    /// Processes in 32K sub-blocks to keep the `remaining[]` working set in
+    /// L1 cache.
     ///
-    /// `base_primes` must contain all primes up to at least √(2·(lo+len)).
-    pub fn compute(lo: u64, len: usize, base_primes: &[u64]) -> Self {
+    /// `prime_data` must contain all primes up to at least √(2·(lo+len)).
+    pub fn compute(lo: u64, len: usize, prime_data: &[PrimeData]) -> Self {
         if len == 0 {
             return Self {
                 is_governor: vec![],
@@ -66,85 +170,169 @@ impl FusedBatchResult {
         let max_n: u128 = (lo as u128) + (len as u128) - 1;
         let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(1);
 
-        // remaining[i] tracks the cofactor of (lo+i) after dividing out small primes.
-        // For non-rejected numbers, this is maintained accurately.
-        // For rejected numbers, we skip divisions (remaining is invalid but unused).
-        let mut remaining = Vec::with_capacity(len);
-        for i in 0..len {
-            remaining.push(lo + i as u64);
-        }
+        let total_primes = prime_data.partition_point(|pd| (pd.p as u64) <= sieve_limit);
+        let first_odd = if total_primes > 0 && prime_data[0].p == 2 {
+            1
+        } else {
+            0
+        };
+
+        let mut remaining = vec![0u64; len];
         let mut is_governor = vec![true; len];
         let mut rejected_vp_fail = 0usize;
 
-        // Handle edge cases: n = 0 or 1
+        // Phase 1: Initialize remaining[] — strip factor of 2, check v_2 inline.
         for i in 0..len {
             let n = lo + i as u64;
             if n <= 1 {
                 is_governor[i] = n == 1;
-                remaining[i] = 1; // prevent sieve from processing
+                remaining[i] = 1;
+                continue;
+            }
+            let tz = n.trailing_zeros();
+            remaining[i] = n >> tz;
+            if (n.count_ones() as u32) < tz {
+                is_governor[i] = false;
+                rejected_vp_fail += 1;
             }
         }
 
-        // === Fused sieve: divide out primes AND check v_p inline ===
-        for &p in base_primes {
-            if p > sieve_limit {
-                break;
-            }
-
-            // Find first multiple of p >= lo
+        // Phase 2: Compute initial offsets for all odd primes (Barrett reduction).
+        let mut prime_offsets = vec![0u32; total_primes];
+        for idx in first_odd..total_primes {
+            let pd = &prime_data[idx];
+            let p = pd.p as u64;
             let first_multiple = if lo == 0 {
-                p // skip n=0
-            } else if lo % p == 0 {
-                lo
+                p
             } else {
-                lo + (p - lo % p)
+                let num = lo + p - 1;
+                let start_c = (((num as u128).wrapping_mul(pd.magic as u128)) >> 64) as u64
+                    >> pd.shift as u64;
+                let fm = start_c * p;
+                if fm < lo { fm + p } else { fm }
             };
+            prime_offsets[idx] = (first_multiple - lo) as u32;
+        }
 
-            let mut idx = (first_multiple - lo) as usize;
-            while idx < len {
-                // Skip already-rejected numbers entirely.
-                // Their remaining[] is invalid (not fully reduced), but we
-                // never read it again — they're already marked not-governor.
-                if !is_governor[idx] {
-                    idx += p as usize;
-                    continue;
-                }
+        // Phase 3: Process in sub-blocks for L1 cache residency.
+        let first_large = prime_data[..total_primes]
+            .partition_point(|pd| (pd.p as usize) <= BLOCK_SIZE);
 
-                if remaining[idx] % p == 0 {
-                    // Count and divide out all factors of p
-                    let mut exp = 0u32;
-                    while remaining[idx] % p == 0 {
-                        exp += 1;
-                        remaining[idx] /= p;
-                    }
-
-                    // Check v_p(C(2n,n)) ≥ v_p(n) inline (const-generic dispatch)
-                    let n = lo + idx as u64;
-                    let supply = vp_central_binom_dispatch(n, p);
-                    if (exp as u64) > supply {
-                        is_governor[idx] = false;
-                        rejected_vp_fail += 1;
-                    }
-                }
-
-                idx += p as usize;
+        // Pre-bucket large primes by target block index.
+        let num_blocks = len.div_ceil(BLOCK_SIZE);
+        let mut buckets: Vec<PrimeBucket> =
+            (0..num_blocks).map(|_| PrimeBucket::new()).collect();
+        for pidx in first_large..total_primes {
+            let p = prime_data[pidx].p;
+            let mut sj = prime_offsets[pidx];
+            while (sj as usize) < len {
+                let block_idx = (sj as usize) / BLOCK_SIZE;
+                let offset = (sj as usize) % BLOCK_SIZE;
+                buckets[block_idx].push(pidx as u32, offset as u32);
+                sj += p;
             }
+        }
+
+        let mut block_start: usize = 0;
+        while block_start < len {
+            let block_end = (block_start + BLOCK_SIZE).min(len);
+            let block_len = (block_end - block_start) as u32;
+
+            // Small primes (p <= BLOCK_SIZE): stride through this block
+            // Uses const-generic dispatch for primes 3-97 (compile-time inverse).
+            for pidx in first_odd..first_large {
+                let pd = &prime_data[pidx];
+                let mut sj = prime_offsets[pidx];
+                if sj < block_len {
+                    while sj < block_len {
+                        let abs_idx = block_start + sj as usize;
+                        if is_governor[abs_idx] {
+                            let exp = dispatch_strip!(
+                                &mut remaining[abs_idx],
+                                pd,
+                                [
+                                    3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59,
+                                    61, 67, 71, 73, 79, 83, 89, 97
+                                ]
+                            );
+                            if exp > 0 {
+                                let n = lo + abs_idx as u64;
+                                let supply = vp_central_binom_dispatch(n, pd.p as u64);
+                                if (exp as u64) > supply {
+                                    is_governor[abs_idx] = false;
+                                    rejected_vp_fail += 1;
+                                }
+                            }
+                        }
+                        sj += pd.p;
+                    }
+                    prime_offsets[pidx] = sj - block_len;
+                } else {
+                    prime_offsets[pidx] = sj - block_len;
+                }
+            }
+
+            // Large primes: process from pre-built buckets with prefetch
+            {
+                let block_idx = block_start / BLOCK_SIZE;
+                let bucket = &buckets[block_idx];
+                let pd_ptr = prime_data.as_ptr();
+                for (bi, item) in bucket.items.iter().enumerate() {
+                    // Prefetch upcoming prime data (8 items ahead)
+                    if bi + 8 < bucket.items.len() {
+                        let future_idx = bucket.items[bi + 8].pd_idx as usize;
+                        let ptr = unsafe { pd_ptr.add(future_idx) as *const u8 };
+                        unsafe {
+                            #[cfg(target_arch = "aarch64")]
+                            std::arch::asm!(
+                                "prfm pldl2keep, [{ptr}]",
+                                ptr = in(reg) ptr,
+                                options(nostack, preserves_flags)
+                            );
+                            #[cfg(target_arch = "x86_64")]
+                            std::arch::x86_64::_mm_prefetch(
+                                ptr as *const i8,
+                                std::arch::x86_64::_MM_HINT_T1,
+                            );
+                        }
+                    }
+
+                    let abs_idx = block_start + item.offset as usize;
+                    if !is_governor[abs_idx] {
+                        continue;
+                    }
+                    let pd = &prime_data[item.pd_idx as usize];
+                    let exp = strip_prime_dyn(
+                        &mut remaining[abs_idx],
+                        pd.inv_p,
+                        pd.max_quot,
+                    );
+                    if exp > 0 {
+                        let n = lo + abs_idx as u64;
+                        let supply = vp_central_binom_dispatch(n, pd.p as u64);
+                        if (exp as u64) > supply {
+                            is_governor[abs_idx] = false;
+                            rejected_vp_fail += 1;
+                        }
+                    }
+                }
+            }
+
+            block_start = block_end;
         }
 
         // === Post-sieve: check for large prime factors ===
-        // For numbers still marked as governor, if remaining > 1, the cofactor
-        // is a single prime > sieve_limit > √(2n) → not a governor.
         let mut rejected_odd_prime = 0usize;
         let mut rejected_large_pf = 0usize;
 
         for i in 0..len {
             if is_governor[i] && remaining[i] > 1 {
                 is_governor[i] = false;
-                if remaining[i] == lo + i as u64 {
-                    // No small prime divided n → n is prime
+                let n = lo + i as u64;
+                let n_odd = n >> n.trailing_zeros();
+                if remaining[i] == n_odd {
                     rejected_odd_prime += 1;
                 } else {
-                    // n is composite with a large prime factor
                     rejected_large_pf += 1;
                 }
             }
@@ -159,6 +347,14 @@ impl FusedBatchResult {
             rejected_large_pf,
             rejected_vp_fail,
         }
+    }
+
+    /// Legacy entry point: builds PrimeData on the fly from raw primes.
+    ///
+    /// Prefer `compute()` with pre-built PrimeData for production use.
+    pub fn compute_from_primes(lo: u64, len: usize, base_primes: &[u64]) -> Self {
+        let prime_data = build_prime_data(base_primes);
+        Self::compute(lo, len, &prime_data)
     }
 }
 
@@ -371,7 +567,7 @@ mod tests {
         let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
-        let fused = FusedBatchResult::compute(lo, len, sieve.primes());
+        let fused = FusedBatchResult::compute_from_primes(lo, len, sieve.primes());
         let checker = GovernorChecker::new(hi);
 
         for i in 0..len {
@@ -395,7 +591,7 @@ mod tests {
         let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
-        let fused = FusedBatchResult::compute(lo, len, sieve.primes());
+        let fused = FusedBatchResult::compute_from_primes(lo, len, sieve.primes());
         let checker = GovernorChecker::new(hi);
 
         let mut mismatches = 0;
@@ -427,7 +623,7 @@ mod tests {
         let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
-        let fused = FusedBatchResult::compute(lo, len, sieve.primes());
+        let fused = FusedBatchResult::compute_from_primes(lo, len, sieve.primes());
         let checker = GovernorChecker::new(hi);
 
         // The k=8 witness run: 339,949,244 through 339,949,252 should all be governors
@@ -452,7 +648,7 @@ mod tests {
         let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
-        let fused = FusedBatchResult::compute(lo, len, sieve.primes());
+        let fused = FusedBatchResult::compute_from_primes(lo, len, sieve.primes());
         let checker = GovernorChecker::with_sieve(sieve);
 
         for i in 0..len {
@@ -482,7 +678,7 @@ mod tests {
         let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
-        let fused = FusedBatchResult::compute(lo, len, sieve.primes());
+        let fused = FusedBatchResult::compute_from_primes(lo, len, sieve.primes());
         let checker = GovernorChecker::new(hi);
 
         let expected_count = (lo..hi).filter(|&n| checker.is_governor(n)).count();
@@ -501,7 +697,7 @@ mod tests {
         let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
         let sieve = PrimeSieve::new(sieve_limit);
 
-        let fused = FusedBatchResult::compute(lo, len, sieve.primes());
+        let fused = FusedBatchResult::compute_from_primes(lo, len, sieve.primes());
 
         // governor_count + rejected should equal len (minus edge cases)
         let total_rejected =
@@ -518,5 +714,36 @@ mod tests {
             total_rejected,
             len
         );
+    }
+
+    #[test]
+    fn test_fused_modinv_matches_original_wide_range() {
+        // Test across multiple ranges to catch edge cases
+        for &(lo, len) in &[
+            (2u64, 500),
+            (10_000, 5_000),
+            (1_000_000, 10_000),
+            (339_949_240, 20),        // k=8 witness region
+            (1_019_547_840, 20),      // k=9 witness region
+            (24_999_999_999_900, 20), // 25T scale
+        ] {
+            let hi = lo + len as u64;
+            let max_n: u128 = (lo as u128) + (len as u128) - 1;
+            let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(100);
+            let sieve = PrimeSieve::new(sieve_limit);
+
+            let fused = FusedBatchResult::compute_from_primes(lo, len, sieve.primes());
+            let checker = GovernorChecker::with_sieve(sieve);
+
+            for i in 0..len {
+                let n = lo + i as u64;
+                let expected = checker.is_governor(n);
+                assert_eq!(
+                    fused.is_governor[i], expected,
+                    "Fused disagrees at n={} (range [{}, {})): fused={}, expected={}",
+                    n, lo, hi, fused.is_governor[i], expected
+                );
+            }
+        }
     }
 }
