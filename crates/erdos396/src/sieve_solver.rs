@@ -734,14 +734,10 @@ pub fn solve<H: SolverHooks>(
                     }
 
                     // Post-chunk: scan smooth[] for runs and report via hooks.
-                    // Short runs (< k+1) are reported as-is from the sieve (may
-                    // include a few false governors, but this only affects the
-                    // distribution of short runs — not correctness of witnesses).
-                    // Long runs (>= k+1) are verified against the true governor
-                    // check so the longest_run statistic is accurate.
+                    // Every sieve-based run >= min_run is verified against the
+                    // true governor check so all reported statistics are accurate.
                     if do_track_runs {
                         let min_run = hooks.min_run_length();
-                        let target_run = (k + 1) as usize;
                         let checker = gov_checker.as_ref().unwrap();
                         let mut run_start = 0u64;
                         let mut run_len = 0usize;
@@ -755,54 +751,44 @@ pub fn solve<H: SolverHooks>(
                                 run_len += 1;
                             } else {
                                 if run_len >= min_run {
-                                    if run_len >= target_run {
-                                        // Long run: verify each position
-                                        let mut vlen = 0usize;
-                                        let mut vstart = run_start;
-                                        for j in 0..run_len {
-                                            let n = run_start + j as u64;
-                                            if checker.is_governor_fast(n) {
-                                                if vlen == 0 { vstart = n; }
-                                                vlen += 1;
-                                            } else {
-                                                if vlen >= min_run {
-                                                    hooks.on_run(worker_id, vstart, vlen);
-                                                }
-                                                vlen = 0;
+                                    let mut vlen = 0usize;
+                                    let mut vstart = run_start;
+                                    for j in 0..run_len {
+                                        let n = run_start + j as u64;
+                                        if checker.is_governor_fast(n) {
+                                            if vlen == 0 { vstart = n; }
+                                            vlen += 1;
+                                        } else {
+                                            if vlen >= min_run {
+                                                hooks.on_run(worker_id, vstart, vlen);
                                             }
+                                            vlen = 0;
                                         }
-                                        if vlen >= min_run {
-                                            hooks.on_run(worker_id, vstart, vlen);
-                                        }
-                                    } else {
-                                        // Short run: report unverified (fast path)
-                                        hooks.on_run(worker_id, run_start, run_len);
+                                    }
+                                    if vlen >= min_run {
+                                        hooks.on_run(worker_id, vstart, vlen);
                                     }
                                 }
                                 run_len = 0;
                             }
                         }
                         if run_len >= min_run {
-                            if run_len >= target_run {
-                                let mut vlen = 0usize;
-                                let mut vstart = run_start;
-                                for j in 0..run_len {
-                                    let n = run_start + j as u64;
-                                    if checker.is_governor_fast(n) {
-                                        if vlen == 0 { vstart = n; }
-                                        vlen += 1;
-                                    } else {
-                                        if vlen >= min_run {
-                                            hooks.on_run(worker_id, vstart, vlen);
-                                        }
-                                        vlen = 0;
+                            let mut vlen = 0usize;
+                            let mut vstart = run_start;
+                            for j in 0..run_len {
+                                let n = run_start + j as u64;
+                                if checker.is_governor_fast(n) {
+                                    if vlen == 0 { vstart = n; }
+                                    vlen += 1;
+                                } else {
+                                    if vlen >= min_run {
+                                        hooks.on_run(worker_id, vstart, vlen);
                                     }
+                                    vlen = 0;
                                 }
-                                if vlen >= min_run {
-                                    hooks.on_run(worker_id, vstart, vlen);
-                                }
-                            } else {
-                                hooks.on_run(worker_id, run_start, run_len);
+                            }
+                            if vlen >= min_run {
+                                hooks.on_run(worker_id, vstart, vlen);
                             }
                         }
                     }
