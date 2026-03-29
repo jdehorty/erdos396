@@ -4,14 +4,56 @@
 
 use std::fs;
 use std::io::Write;
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
 
 type Prime = u32;
 
-const CHUNK_SIZE: u64 = 10_000_000;
-const BLOCK_SIZE: usize = 32768; // L2-resident (~256 KiB for u64)
-const NUM_SEQ: u64 = 2;
+const CHUNK_SIZE: u64 = 1_048_576; // 1M — matches C++ reference
+const BLOCK_SIZE: u32 = 32768;
+const BLOCK_SHIFT: u32 = 15;
+const BLOCK_MASK: u32 = 0x7FFF;
+
+// ---------------------------------------------------------------------------
+// PrimeData — precomputed per-prime data for fast modular arithmetic
+// ---------------------------------------------------------------------------
+#[derive(Clone, Copy)]
+struct PrimeData {
+    p: u32,
+    inv_p: u64,   // modular inverse of p mod 2^64
+    max_quot: u64, // u64::MAX / p — used for divisibility test
+}
+
+// ---------------------------------------------------------------------------
+// BucketItem / FastBucket — for bucketing large primes by target block
+// ---------------------------------------------------------------------------
+#[derive(Clone, Copy)]
+struct BucketItem {
+    p_idx: u32,
+    offset: u32,
+}
+
+struct FastBucket {
+    data: Vec<BucketItem>,
+}
+
+impl FastBucket {
+    fn new() -> Self {
+        FastBucket {
+            data: Vec::with_capacity(16384),
+        }
+    }
+
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.data.clear();
+    }
+
+    #[inline(always)]
+    fn push(&mut self, p_idx: u32, offset: u32) {
+        self.data.push(BucketItem { p_idx, offset });
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Modular-inverse exact division (computed inline, no precomputed table)
@@ -63,6 +105,26 @@ fn sieve_primes(limit: usize) -> Vec<Prime> {
     primes
 }
 
+/// Build PrimeData vec from raw primes vec.
+fn build_prime_data(primes: &[Prime]) -> Vec<PrimeData> {
+    primes
+        .iter()
+        .map(|&p| {
+            let p64 = p as u64;
+            let inv_p = if p % 2 != 0 {
+                mod_inverse_u64(p64)
+            } else {
+                0
+            };
+            PrimeData {
+                p,
+                inv_p,
+                max_quot: u64::MAX / p64,
+            }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Integer sqrt (correct for all u64, unlike f64 which loses precision > 2^53)
 // ---------------------------------------------------------------------------
@@ -83,11 +145,118 @@ fn isqrt_u64(n: u64) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// process_prime<P> — const-generic strip with offset tracking
+// Matches C++ process_prime_p<p>: strips ALL factors of P from rem[j],
+// stepping by P, and updates start_j for next block.
+// ---------------------------------------------------------------------------
+#[inline(always)]
+fn process_prime<const P: u32>(start_j: &mut u32, w_block: u32, rem: *mut u64) {
+    const fn inv_p_const(p: u64) -> u64 {
+        let mut inv = p.wrapping_mul(3) ^ 2;
+        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
+        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
+        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
+        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
+        inv
+    }
+
+    const fn limit_const(p: u64) -> u64 {
+        u64::MAX / p
+    }
+
+    // These are computed at compile time for each monomorphization
+    let inv = inv_p_const(P as u64);
+    let limit = limit_const(P as u64);
+
+    let mut j = *start_j;
+    while j < w_block {
+        unsafe {
+            let r = *rem.add(j as usize);
+            // First division (always — we know p | (n-i) at this offset)
+            let mut temp = r.wrapping_mul(inv);
+            // Strip additional factors (rare)
+            let mut q = temp.wrapping_mul(inv);
+            if q <= limit {
+                temp = q;
+                loop {
+                    q = temp.wrapping_mul(inv);
+                    if q > limit {
+                        break;
+                    }
+                    temp = q;
+                }
+            }
+            *rem.add(j as usize) = temp;
+        }
+        j += P;
+    }
+    *start_j = j - w_block;
+}
+
+// ---------------------------------------------------------------------------
+// process_prime_dyn — dynamic strip with precomputed inv_p/max_quot
+// Accepts p as u64 (fix #3 from plan review).
+// ---------------------------------------------------------------------------
+#[inline(always)]
+fn process_prime_dyn(
+    p: u64,
+    inv_p: u64,
+    max_quot: u64,
+    start_j: &mut u32,
+    w_block: u32,
+    rem: *mut u64,
+) {
+    let p32 = p as u32;
+    let mut j = *start_j;
+    while j < w_block {
+        unsafe {
+            let r = *rem.add(j as usize);
+            let mut temp = r.wrapping_mul(inv_p);
+            let mut q = temp.wrapping_mul(inv_p);
+            if q <= max_quot {
+                temp = q;
+                loop {
+                    q = temp.wrapping_mul(inv_p);
+                    if q > max_quot {
+                        break;
+                    }
+                    temp = q;
+                }
+            }
+            *rem.add(j as usize) = temp;
+        }
+        j += p32;
+    }
+    *start_j = j - w_block;
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch macro — const-generic for small primes, dynamic for the rest
+// ---------------------------------------------------------------------------
+macro_rules! dispatch_strip {
+    ($p:expr, $inv:expr, $limit:expr, $sj:expr, $w:expr, $rm:expr, [$($prime:literal),* $(,)?]) => {
+        match $p {
+            $($prime => process_prime::<$prime>($sj, $w, $rm),)*
+            _ => process_prime_dyn($p as u64, $inv, $limit, $sj, $w, $rm),
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Exact check — cold path, called only on rare candidate witnesses
+//
+// Part 1: v_2 check (popcount-based Kummer's theorem for p=2)
+// Part 2: Legendre formula for primes p <= 2k
+// Part 3: Per-element large prime check (for each n-i, check residual
+//         large prime factors against Legendre bound on C(2n,n))
 // ---------------------------------------------------------------------------
 #[cold]
 #[inline(never)]
-fn exact_check(n: u64, k: u64, small_primes: &[Prime]) -> bool {
+fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
+    let two_k = 2 * k;
+    let two_n = 2 * n;
+
+    // Part 1: v_2 check
     let n_ones = n.count_ones() as u64;
     let nu2_prod = ((n - k - 1).count_ones() as u64)
         .wrapping_sub(n_ones)
@@ -95,12 +264,16 @@ fn exact_check(n: u64, k: u64, small_primes: &[Prime]) -> bool {
     if n_ones < nu2_prod {
         return false;
     }
-    let two_n = n << 1;
+
+    // Part 2: Legendre formula for primes p in (2, 2k]
     let nk1 = n - k - 1;
-    for &p32 in small_primes {
-        let p = p32 as u64;
+    for pd in prime_data {
+        let p = pd.p as u64;
         if p == 2 {
             continue;
+        }
+        if p > two_k {
+            break;
         }
         let (mut nu_prod, mut nu_comb, mut pw) = (0u64, 0u64, p);
         loop {
@@ -116,243 +289,98 @@ fn exact_check(n: u64, k: u64, small_primes: &[Prime]) -> bool {
             return false;
         }
     }
+
+    // Part 3: Per-element large prime check
+    // For each element n-i (i=0..k), strip small primes then check
+    // any remaining large prime factor against Legendre bound.
+    for i in 0..=k {
+        let ni = n - i;
+        let mut temp = ni;
+        // Strip factor of 2
+        temp >>= temp.trailing_zeros();
+
+        for pd in prime_data {
+            let p = pd.p as u64;
+            if p == 2 {
+                continue;
+            }
+
+            if p <= two_k {
+                // Strip all factors of small primes
+                let mut q = temp.wrapping_mul(pd.inv_p);
+                while q <= pd.max_quot {
+                    temp = q;
+                    q = temp.wrapping_mul(pd.inv_p);
+                }
+                continue;
+            }
+
+            // For primes > 2k: if p^2 > temp, temp is either 1 or a single
+            // large prime factor
+            if p * p > temp {
+                if temp > two_k {
+                    // temp is a large prime factor of (n-i); check Legendre
+                    let p_val = temp;
+                    // v_p(n-i): count how many times p_val divides (n-i)
+                    let mut nu_prod = 1u64;
+                    let mut t2 = ni / p_val; // (n-i) / p_val, already divided once
+                    while t2 > 0 && t2 % p_val == 0 {
+                        nu_prod += 1;
+                        t2 /= p_val;
+                    }
+
+                    // v_p(C(2n,n)) via Legendre formula — use n, NOT ni
+                    let mut nu_comb = 0u64;
+                    let mut power = p_val;
+                    loop {
+                        let v_n = n / power;
+                        nu_comb += two_n / power - 2 * v_n;
+                        if power > two_n / p_val {
+                            break;
+                        }
+                        power *= p_val;
+                    }
+                    if nu_prod > nu_comb {
+                        return false;
+                    }
+                }
+                break;
+            }
+
+            // p > 2k but p^2 <= temp: check if p divides temp
+            let q = temp.wrapping_mul(pd.inv_p);
+            if q <= pd.max_quot {
+                // p divides temp; count how many times
+                let mut nu_prod = 0u64;
+                let mut q2 = q;
+                loop {
+                    nu_prod += 1;
+                    temp = q2;
+                    q2 = temp.wrapping_mul(pd.inv_p);
+                    if q2 > pd.max_quot {
+                        break;
+                    }
+                }
+
+                // v_p(C(2n,n)) via Legendre formula — use n, NOT ni
+                let mut nu_comb = 0u64;
+                let mut power = p;
+                loop {
+                    let v_n = n / power;
+                    nu_comb += two_n / power - 2 * v_n;
+                    if power > two_n / p {
+                        break;
+                    }
+                    power *= p;
+                }
+                if nu_prod > nu_comb {
+                    return false;
+                }
+            }
+        }
+    }
+
     true
-}
-
-// ---------------------------------------------------------------------------
-// Strip kernel — for primes <= 2k (no governor check needed)
-// ---------------------------------------------------------------------------
-#[inline(always)]
-fn strip_prime<const P: u64>(start_j: usize, w: usize, rem: *mut u64) {
-    let ps = P as usize;
-    let mut j = start_j;
-    while j < w {
-        unsafe {
-            let r = *rem.add(j);
-            if r != 0 {
-                let mut t = r / P;
-                while t % P == 0 {
-                    t /= P;
-                }
-                *rem.add(j) = t;
-            }
-        }
-        j += ps;
-    }
-}
-
-#[inline(always)]
-fn strip_prime_dyn(p: u64, start_j: usize, w: usize, rem: *mut u64) {
-    let ps = p as usize;
-    let p_inv = mod_inverse_u64(p);
-    let max_quot = u64::MAX / p;
-    let mut j = start_j;
-    while j < w {
-        unsafe {
-            let r = *rem.add(j);
-            if r != 0 {
-                let mut t = r.wrapping_mul(p_inv);
-                while t.wrapping_mul(p_inv) <= max_quot {
-                    t = t.wrapping_mul(p_inv);
-                }
-                *rem.add(j) = t;
-            }
-        }
-        j += ps;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Kummer helpers
-// ---------------------------------------------------------------------------
-#[inline(always)]
-fn strip_factors_const<const P: u64>(mut r: u64) -> u64 {
-    r /= P;
-    while r % P == 0 {
-        r /= P;
-    }
-    r
-}
-
-#[inline(always)]
-fn strip_factors_dyn(mut r: u64, p: u64) -> u64 {
-    let p_inv = mod_inverse_u64(p);
-    let max_quot = u64::MAX / p;
-    r = r.wrapping_mul(p_inv);
-    while r.wrapping_mul(p_inv) <= max_quot {
-        r = r.wrapping_mul(p_inv);
-    }
-    r
-}
-
-/// Kummer check on c = n/p: returns true if v_p(C(2n,n)) > v_p(c).
-/// Since v_p(n) = v_p(c) + 1 and v_p(C(2n,n)) = carries(c+c in base p),
-/// the governor condition v_p(C(2n,n)) >= v_p(n) becomes carries > v_p(c).
-#[inline(always)]
-fn kummer_ok_const<const P: u64>(mut c: u64) -> bool {
-    let mut nu = 0u64;
-    while c % P == 0 {
-        nu += 1;
-        c /= P;
-    }
-    let mut carries = 0u64;
-    let mut carry = 0u64;
-    while c != 0 {
-        let d = c % P;
-        let ge = (d + d + carry >= P) as u64;
-        carries += ge;
-        if carries > nu {
-            return true;
-        }
-        carry = ge;
-        c /= P;
-    }
-    false
-}
-
-#[inline(always)]
-fn kummer_ok_dyn(mut c: u64, p: u64) -> bool {
-    let p_inv = mod_inverse_u64(p);
-    let max_quot = u64::MAX / p;
-    // Part 1: strip factors of p (exact division via modular inverse)
-    let mut nu = 0u64;
-    while c.wrapping_mul(p_inv) <= max_quot {
-        nu += 1;
-        c = c.wrapping_mul(p_inv);
-    }
-    // Part 2: base-p digit extraction (hardware div for correct general divmod)
-    let mut carries = 0u64;
-    let mut carry = 0u64;
-    while c != 0 {
-        let d = c % p;
-        let ge = (d + d + carry >= p) as u64;
-        carries += ge;
-        if carries > nu {
-            return true;
-        }
-        carry = ge;
-        c /= p;
-    }
-    false
-}
-
-// ---------------------------------------------------------------------------
-// Three-phase Kummer kernel — for primes > 2k
-//
-// Phase 1: c < ceil(P/2) → 0 carries, but v_p(n) >= 1 → reject
-// Phase 2: ceil(P/2) <= c < P → 1 carry, v_p(n) = 1 → accept, single strip
-// Phase 3: c >= P → full Kummer check
-// ---------------------------------------------------------------------------
-#[inline(always)]
-fn kummer_prime<const P: u64>(
-    mut c: u64,
-    mut j: usize,
-    w: usize,
-    rem: *mut u64,
-) {
-    let ps = P as usize;
-    let half = (P + 1) >> 1;
-
-    // Phase 1: unconditional reject
-    while j < w && c < half {
-        unsafe {
-            if *rem.add(j) != 0 {
-                *rem.add(j) = 0;
-            }
-        }
-        j += ps;
-        c += 1;
-    }
-
-    // Phase 2: unconditional accept + single division (v_p(n) = 1)
-    while j < w && c < P {
-        unsafe {
-            let r = *rem.add(j);
-            if r != 0 {
-                *rem.add(j) = r / P;
-            }
-        }
-        j += ps;
-        c += 1;
-    }
-
-    // Phase 3: full Kummer
-    while j < w {
-        unsafe {
-            let r = *rem.add(j);
-            if r != 0 {
-                if kummer_ok_const::<P>(c) {
-                    *rem.add(j) = strip_factors_const::<P>(r);
-                } else {
-                    *rem.add(j) = 0;
-                }
-            }
-        }
-        j += ps;
-        c += 1;
-    }
-}
-
-fn kummer_prime_dyn(p: u64, mut c: u64, mut j: usize, w: usize, rem: *mut u64) {
-    let ps = p as usize;
-    let half = (p + 1) >> 1;
-    let p_inv = mod_inverse_u64(p);
-
-    while j < w && c < half {
-        unsafe {
-            if *rem.add(j) != 0 {
-                *rem.add(j) = 0;
-            }
-        }
-        j += ps;
-        c += 1;
-    }
-    while j < w && c < p {
-        unsafe {
-            let r = *rem.add(j);
-            if r != 0 {
-                // Exact division via modular inverse (r is divisible by p)
-                *rem.add(j) = r.wrapping_mul(p_inv);
-            }
-        }
-        j += ps;
-        c += 1;
-    }
-    while j < w {
-        unsafe {
-            let r = *rem.add(j);
-            if r != 0 {
-                if kummer_ok_dyn(c, p) {
-                    *rem.add(j) = strip_factors_dyn(r, p);
-                } else {
-                    *rem.add(j) = 0;
-                }
-            }
-        }
-        j += ps;
-        c += 1;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Dispatch macros — strip (small) and kummer (large) kernels
-// ---------------------------------------------------------------------------
-macro_rules! dispatch_strip {
-    ($p:expr, $sj:expr, $w:expr, $rm:expr, [$($prime:literal),* $(,)?]) => {
-        match $p {
-            $($prime => strip_prime::<$prime>($sj, $w, $rm),)*
-            _ => strip_prime_dyn($p as u64, $sj, $w, $rm),
-        }
-    };
-}
-
-macro_rules! dispatch_kummer {
-    ($p:expr, $sc:expr, $sj:expr, $w:expr, $rm:expr, [$($prime:literal),* $(,)?]) => {
-        match $p {
-            $($prime => kummer_prime::<$prime>($sc, $sj, $w, $rm),)*
-            _ => kummer_prime_dyn($p as u64, $sc, $sj, $w, $rm),
-        }
-    };
 }
 
 // ---------------------------------------------------------------------------
@@ -368,182 +396,296 @@ fn write_checkpoint(k: u64, l_batch: u64) {
 }
 
 // ---------------------------------------------------------------------------
-// Solver
+// Solver — bucketed sieve architecture matching C++ reference
 // ---------------------------------------------------------------------------
 fn solve(
     k: u64,
     start_l: u64,
     end_l: u64,
-    primes: &[Prime],
+    prime_data: &[PrimeData],
     n_threads: u32,
-    run_log_threshold: u64,
+    _run_log_threshold: u64,
 ) -> u64 {
-    let cpb = n_threads as u64 * NUM_SEQ;
-    let k2 = 2 * k;
-    let mut l_batch = start_l;
+    let k32 = k as u32;
+    let two_k = 2 * k;
     let t_start = Instant::now();
 
-    // Pre-partition: strip-only primes (p <= 2k, skip p=2) and Kummer primes
-    let strip_end = primes.partition_point(|&p| (p as u64) <= k2);
-    let strip_primes = if strip_end > 1 { &primes[1..strip_end] } else { &[] as &[Prime] };
-    let exact_primes = &primes[..strip_end]; // for exact_check (includes p=2)
+    let global_min_n = AtomicU64::new(u64::MAX);
+    let current_chunk = AtomicU64::new(0);
+    let longest_seen = AtomicU64::new(0);
 
-    let best = AtomicU64::new(u64::MAX);
-    let longest_seen = AtomicU32::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..n_threads {
+            s.spawn(|| {
+                // rem buffer: BLOCK_SIZE + k + 1 for overlap (fix #4)
+                let buf_size = BLOCK_SIZE as usize + k as usize + 1;
+                let mut rem = vec![0u64; buf_size];
+                let mut prime_offsets: Vec<u32> = Vec::new();
 
-    loop {
-        // Check end bound
-        if l_batch >= end_l {
-            return best.load(Relaxed);
-        }
+                // 33 buckets: ceil(CHUNK_SIZE / BLOCK_SIZE) + 1
+                let num_buckets = (CHUNK_SIZE as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE + 1;
+                let mut buckets: Vec<FastBucket> =
+                    (0..num_buckets).map(|_| FastBucket::new()).collect();
 
-        let next_chunk = AtomicI32::new(0);
+                loop {
+                    let chunk_id =
+                        current_chunk.fetch_add(1, Relaxed);
+                    let l_chunk = start_l + chunk_id * CHUNK_SIZE;
 
-        std::thread::scope(|s| {
-            for _ in 0..n_threads {
-                s.spawn(|| {
-                    let mut rem_buf = vec![0u64; BLOCK_SIZE];
+                    if l_chunk >= end_l {
+                        break;
+                    }
+                    if l_chunk > global_min_n.load(Relaxed) {
+                        break;
+                    }
 
-                    loop {
-                        let cid = next_chunk.fetch_add(1, Relaxed);
-                        if cid >= cpb as i32 {
-                            break;
-                        }
-                        let l = l_batch + cid as u64 * CHUNK_SIZE;
-                        if l >= end_l {
-                            continue;
-                        }
-                        let r = l + CHUNK_SIZE + k - 1;
-                        if l > best.load(Relaxed) {
-                            continue;
-                        }
+                    let r_chunk = l_chunk + CHUNK_SIZE + k - 1;
+                    let chunk_w = (r_chunk - l_chunk + 1) as u32;
 
-                        let max_p = isqrt_u64(r.saturating_mul(2)).max(k2);
-                        let kummer_end =
-                            primes.partition_point(|&p| (p as u64) <= max_p);
-                        let kummer_primes = &primes[strip_end..kummer_end];
+                    let max_p =
+                        isqrt_u64(r_chunk.saturating_mul(2)).max(two_k) + 1;
+                    let chunk_total_primes = prime_data
+                        .partition_point(|pd| (pd.p as u64) <= max_p);
 
-                        let mut consec = 0u64;
-                        let mut local_best = best.load(Relaxed);
+                    if prime_offsets.len() < chunk_total_primes {
+                        prime_offsets.resize(chunk_total_primes, 0);
+                    }
 
-                        let mut bl = l;
-                        while bl <= r {
-                            let br = r.min(bl + BLOCK_SIZE as u64 - 1);
-                            let w = (br - bl + 1) as usize;
-                            let rm = rem_buf.as_mut_ptr();
+                    // Find first large prime (p > BLOCK_SIZE)
+                    let first_large_prime_idx = prime_data[..chunk_total_primes]
+                        .partition_point(|pd| pd.p <= BLOCK_SIZE);
 
-                            // Init: fold p=2 strip into initialization
-                            // rem[j] = odd part of n (strips all factors of 2)
-                            {
-                                let mut n = bl;
-                                for j in 0..w {
-                                    unsafe {
-                                        *rm.add(j) = n >> n.trailing_zeros();
-                                    }
-                                    n += 1;
-                                }
-                            }
+                    // Compute initial offsets for all primes (skip p=2 at idx 0)
+                    for idx in 1..chunk_total_primes {
+                        let p = prime_data[idx].p as u64;
+                        let start_c = (l_chunk + p - 1) / p;
+                        prime_offsets[idx] = (start_c * p - l_chunk) as u32;
+                    }
 
-                            // Strip-only primes (p <= 2k, p > 2)
-                            for &p32 in strip_primes {
-                                let p = p32 as u64;
-                                let sc = (bl + p - 1) / p;
-                                let sj = (sc * p - bl) as usize;
-                                if sj >= w {
-                                    continue;
-                                }
-                                dispatch_strip!(
-                                    p, sj, w, rm,
-                                    [3, 5, 7, 11, 13, 17, 19, 23, 29, 31,
-                                     37, 41, 43, 47, 53, 59, 61, 67, 71,
-                                     73, 79, 83, 89, 97, 101, 103, 107,
-                                     109, 113, 127, 131, 137, 139, 149,
-                                     151, 157, 163, 167, 173, 179, 181,
-                                     191, 193, 197, 199]
-                                );
-                            }
-
-                            // Kummer primes (p > 2k)
-                            for &p32 in kummer_primes {
-                                let p = p32 as u64;
-                                let sc = (bl + p - 1) / p;
-                                let sj = (sc * p - bl) as usize;
-                                if sj >= w {
-                                    continue;
-                                }
-                                dispatch_kummer!(
-                                    p, sc, sj, w, rm,
-                                    [3, 5, 7, 11, 13, 17, 19, 23, 29, 31,
-                                     37, 41, 43, 47, 53, 59, 61, 67, 71,
-                                     73, 79, 83, 89, 97, 101, 103, 107,
-                                     109, 113, 127, 131, 137, 139, 149,
-                                     151, 157, 163, 167, 173, 179, 181,
-                                     191, 193, 197, 199]
-                                );
-                            }
-
-                            // Scan for consecutive governors
-                            let mut n = bl;
-                            for j in 0..w {
-                                if n >= local_best {
-                                    break;
-                                }
-                                unsafe {
-                                    if *rm.add(j) == 1 {
-                                        consec += 1;
-                                        if consec >= k + 1
-                                            && n > k
-                                            && exact_check(n, k, exact_primes)
-                                        {
-                                            let prev =
-                                                best.fetch_min(n, Relaxed);
-                                            local_best = prev.min(n);
-                                        }
-                                    } else {
-                                        if consec >= run_log_threshold {
-                                            let run_end = n - 1;
-                                            let run_start = run_end - consec + 1;
-                                            let prev_longest = longest_seen.fetch_max(consec as u32, Relaxed);
-                                            let marker = if consec as u32 > prev_longest { " *** NEW BEST ***" } else { "" };
-                                            eprintln!("  run={} at [{}, {}]{}", consec, run_start, run_end, marker);
-                                        }
-                                        consec = 0;
-                                    }
-                                }
-                                n += 1;
-                            }
-
-                            bl += BLOCK_SIZE as u64;
+                    // Bucket large primes by target block
+                    for bucket in buckets.iter_mut() {
+                        bucket.clear();
+                    }
+                    for idx in first_large_prime_idx..chunk_total_primes {
+                        let p = prime_data[idx].p;
+                        let mut sj = prime_offsets[idx];
+                        while sj < chunk_w {
+                            let block_idx = sj >> BLOCK_SHIFT;
+                            let offset = sj & BLOCK_MASK;
+                            buckets[block_idx as usize].push(idx as u32, offset);
+                            sj += p;
                         }
                     }
-                });
-            }
-        });
 
-        let result = best.load(Relaxed);
-        if result != u64::MAX {
-            return result;
+                    let mut overlap: u32 = 0;
+                    let mut scan_j: u32 = 0;
+
+                    let mut block_start: u32 = 0;
+                    while block_start < chunk_w {
+                        let block_idx = block_start >> BLOCK_SHIFT;
+                        let block_l = l_chunk + block_start as u64;
+                        let block_r =
+                            r_chunk.min(block_l + BLOCK_SIZE as u64 - 1);
+                        let num_new = (block_r - block_l + 1) as u32;
+
+                        // Initialize new elements: strip factor of 2
+                        {
+                            let mut x = block_l;
+                            for idx_new in 0..num_new {
+                                unsafe {
+                                    *rem.as_mut_ptr()
+                                        .add((overlap + idx_new) as usize) =
+                                        x >> x.trailing_zeros();
+                                }
+                                x += 1;
+                            }
+                        }
+
+                        // rem_ptr points past overlap region
+                        let rem_ptr =
+                            unsafe { rem.as_mut_ptr().add(overlap as usize) };
+
+                        // Process small primes (p <= BLOCK_SIZE, skip p=2)
+                        for idx in 1..first_large_prime_idx {
+                            let p = prime_data[idx].p;
+                            let mut sj = prime_offsets[idx];
+
+                            if sj < num_new {
+                                let inv = prime_data[idx].inv_p;
+                                let limit = prime_data[idx].max_quot;
+
+                                dispatch_strip!(
+                                    p,
+                                    inv,
+                                    limit,
+                                    &mut sj,
+                                    num_new,
+                                    rem_ptr,
+                                    [
+                                        3, 5, 7, 11, 13, 17, 19, 23, 29, 31,
+                                        37, 41, 43, 47, 53, 59, 61, 67, 71,
+                                        73, 79, 83, 89, 97
+                                    ]
+                                );
+                                prime_offsets[idx] = sj;
+                            } else {
+                                prime_offsets[idx] = sj - num_new;
+                            }
+                        }
+
+                        // Process bucketed large primes for this block
+                        {
+                            let b = &buckets[block_idx as usize];
+                            let b_count = b.data.len();
+                            for i in 0..b_count {
+                                // Prefetch hint for upcoming prime data
+                                if i + 8 < b_count {
+                                    let future_idx =
+                                        b.data[i + 8].p_idx as usize;
+                                    unsafe {
+                                        let ptr = prime_data
+                                            .as_ptr()
+                                            .add(future_idx)
+                                            as *const u8;
+                                        #[cfg(target_arch = "x86_64")]
+                                        {
+                                            std::arch::x86_64::_mm_prefetch(
+                                                ptr as *const i8,
+                                                std::arch::x86_64::_MM_HINT_T1,
+                                            );
+                                        }
+                                        // On other architectures the prefetch is
+                                        // a pure hint; skipping it is fine.
+                                        #[cfg(not(target_arch = "x86_64"))]
+                                        {
+                                            let _ = ptr;
+                                        }
+                                    }
+                                }
+
+                                let p_idx = b.data[i].p_idx as usize;
+                                let offset = b.data[i].offset;
+                                let inv_p = prime_data[p_idx].inv_p;
+                                let limit = prime_data[p_idx].max_quot;
+
+                                unsafe {
+                                    let r = *rem_ptr.add(offset as usize);
+                                    let mut temp = r.wrapping_mul(inv_p);
+                                    let mut q = temp.wrapping_mul(inv_p);
+                                    if q <= limit {
+                                        temp = q;
+                                        loop {
+                                            q = temp.wrapping_mul(inv_p);
+                                            if q > limit {
+                                                break;
+                                            }
+                                            temp = q;
+                                        }
+                                    }
+                                    *rem_ptr.add(offset as usize) = temp;
+                                }
+                            }
+                        }
+
+                        // Scan for consecutive governors (sliding window)
+                        let w_search = overlap + num_new;
+                        while scan_j + k32 < w_search {
+                            // Fix #1: use `<` not `<=`
+                            let mut i = k32 as i32;
+                            while i >= 0
+                                && unsafe {
+                                    *rem.as_ptr().add(
+                                        (scan_j + i as u32) as usize,
+                                    )
+                                } <= 1
+                            {
+                                i -= 1;
+                            }
+
+                            if i < 0 {
+                                // All k+1 elements are <= 1 — candidate
+                                let cand_n = block_l
+                                    - overlap as u64
+                                    + scan_j as u64
+                                    + k;
+                                if cand_n > k
+                                    && cand_n
+                                        < global_min_n.load(Relaxed)
+                                {
+                                    if exact_check(
+                                        cand_n,
+                                        k,
+                                        &prime_data[..chunk_total_primes],
+                                    ) {
+                                        let mut current =
+                                            global_min_n.load(Relaxed);
+                                        while cand_n < current {
+                                            match global_min_n
+                                                .compare_exchange_weak(
+                                                    current,
+                                                    cand_n,
+                                                    Relaxed,
+                                                    Relaxed,
+                                                )
+                                            {
+                                                Ok(_) => break,
+                                                Err(c) => current = c,
+                                            }
+                                        }
+                                    }
+                                }
+                                scan_j += 1;
+                            } else {
+                                scan_j += i as u32 + 1;
+                            }
+                        }
+
+                        // Carry overlap for cross-boundary detection
+                        if w_search >= k32 {
+                            for i in 0..k32 {
+                                rem[i as usize] =
+                                    rem[(w_search - k32 + i) as usize];
+                            }
+                            scan_j -= w_search - k32;
+                            overlap = k32;
+                        } else {
+                            overlap = w_search;
+                        }
+
+                        block_start += BLOCK_SIZE;
+                    }
+
+                    // Progress + checkpoint (fix #5)
+                    if chunk_id > n_threads as u64 && chunk_id % 1000 == 0 {
+                        let safe_l = start_l
+                            + chunk_id.saturating_sub(n_threads as u64)
+                                * CHUNK_SIZE;
+                        write_checkpoint(k, safe_l);
+
+                        let elapsed = t_start.elapsed().as_secs_f64();
+                        let done =
+                            (safe_l - start_l) as f64;
+                        let total = (end_l - start_l) as f64;
+                        let pct = done / total * 100.0;
+                        let rate = done / elapsed;
+                        let remaining = (total - done) / rate;
+                        let mins = remaining / 60.0;
+                        let best_run = longest_seen.load(Relaxed);
+                        eprintln!(
+                            "[{:.1}%] pos={:.3}T  {:.0} M/s  ETA {:.1}m  best_run={}",
+                            pct,
+                            safe_l as f64 / 1e12,
+                            rate / 1e6,
+                            mins,
+                            best_run,
+                        );
+                    }
+                }
+            });
         }
-        l_batch += cpb * CHUNK_SIZE;
-        write_checkpoint(k, l_batch);
+    });
 
-        // Progress + ETA
-        let elapsed = t_start.elapsed().as_secs_f64();
-        let done = (l_batch - start_l) as f64;
-        let total = (end_l - start_l) as f64;
-        let pct = done / total * 100.0;
-        let rate = done / elapsed;
-        let remaining = (total - done) / rate;
-        let mins = remaining / 60.0;
-        eprintln!(
-            "[{:.1}%] pos={:.3}T  {:.0} M/s  ETA {:.1}m  best_run={}",
-            pct,
-            l_batch as f64 / 1e12,
-            rate / 1e6,
-            mins,
-            longest_seen.load(Relaxed),
-        );
-    }
+    global_min_n.load(Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -610,6 +752,7 @@ fn main() {
 
     let t0 = Instant::now();
     let primes = sieve_primes(200_000_000);
+    let prime_data = build_prime_data(&primes);
     println!(
         "Primes: {} in {:.3}s\n",
         primes.len(),
@@ -618,7 +761,7 @@ fn main() {
 
     for k in k_start..=k_max {
         let ts = Instant::now();
-        let ans = solve(k, start_l, end_l, &primes, n_threads, run_log);
+        let ans = solve(k, start_l, end_l, &prime_data, n_threads, run_log);
         let sec = ts.elapsed().as_secs_f64();
         let speed =
             if ans >= start_l { (ans - start_l + 1) as f64 } else { 1.0 } / sec;
