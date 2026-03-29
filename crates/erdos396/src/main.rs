@@ -12,28 +12,64 @@ use erdos396::{
 };
 use serde::Serialize;
 use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Recording hooks for normal search mode — tracks witnesses, false positives,
-/// and chunk progress for checkpointing.
+/// Full recording hooks for normal search mode.
+///
+/// Tracks witnesses, false positives, run distribution, coverage invariants,
+/// and writes periodic checkpoints. All state is thread-safe (atomics + Mutex).
 struct RecordingHooks {
+    // Witnesses and candidates
     witnesses: Mutex<Vec<u64>>,
     false_positives: AtomicU64,
+
+    // Coverage invariants (computed from chunk ranges — O(1) per chunk)
+    sum_checked: Mutex<u128>,
+    xor_checked: AtomicU64,
+    total_checked: AtomicU64,
+
+    // Run tracking
+    run_distribution: Mutex<HashMap<usize, u64>>,
+    longest_run: AtomicU64,
+    longest_run_start: AtomicU64,
+
+    // Progress
     chunks_done: AtomicU64,
+
+    // Config
     output_dir: PathBuf,
     k: u64,
+    start: u64,
+    significant_run_threshold: usize,
+    checkpoint_interval_chunks: u64,
 }
 
 impl RecordingHooks {
-    fn new(output_dir: PathBuf, k: u64) -> Self {
+    fn new(
+        output_dir: PathBuf,
+        k: u64,
+        start: u64,
+        significant_run_threshold: usize,
+        checkpoint_interval_chunks: u64,
+    ) -> Self {
         Self {
             witnesses: Mutex::new(Vec::new()),
             false_positives: AtomicU64::new(0),
+            sum_checked: Mutex::new(0u128),
+            xor_checked: AtomicU64::new(0),
+            total_checked: AtomicU64::new(0),
+            run_distribution: Mutex::new(HashMap::new()),
+            longest_run: AtomicU64::new(0),
+            longest_run_start: AtomicU64::new(0),
             chunks_done: AtomicU64::new(0),
             output_dir,
             k,
+            start,
+            significant_run_threshold,
+            checkpoint_interval_chunks,
         }
     }
 }
@@ -51,12 +87,65 @@ impl SolverHooks for RecordingHooks {
 
     fn on_chunk_done(&self, chunk_start: u64, chunk_end: u64) {
         let count = self.chunks_done.fetch_add(1, Ordering::Relaxed) + 1;
-        // Periodic checkpoint: write progress every 1000 chunks
-        if count % 1000 == 0 {
-            let _ = std::fs::create_dir_all(&self.output_dir);
-            let cp_path = self.output_dir.join(format!("checkpoint_k{}.txt", self.k));
-            let _ = std::fs::write(&cp_path, format!("{} {}\n", chunk_end, count));
+
+        // Coverage invariants: accumulate sum/xor from chunk range
+        let chunk_size = chunk_end - chunk_start;
+        self.total_checked
+            .fetch_add(chunk_size, Ordering::Relaxed);
+        {
+            let mut sum = self.sum_checked.lock().unwrap();
+            *sum += sum_range_u128(chunk_start, chunk_end);
         }
+        self.xor_checked
+            .fetch_xor(xor_range(chunk_start, chunk_end), Ordering::Relaxed);
+
+        // Periodic checkpoint
+        if count % self.checkpoint_interval_chunks == 0 {
+            let _ = std::fs::create_dir_all(&self.output_dir);
+            let cp_path = self.output_dir.join(format!("checkpoint_k{}.json", self.k));
+            let witnesses = self.witnesses.lock().unwrap();
+            let run_dist = self.run_distribution.lock().unwrap();
+            let checkpoint = serde_json::json!({
+                "k": self.k,
+                "current_pos": chunk_end,
+                "total_checked": self.total_checked.load(Ordering::Relaxed),
+                "chunks_done": count,
+                "witnesses": *witnesses,
+                "false_positives": self.false_positives.load(Ordering::Relaxed),
+                "longest_run": self.longest_run.load(Ordering::Relaxed),
+                "longest_run_start": self.longest_run_start.load(Ordering::Relaxed),
+                "run_distribution": *run_dist,
+            });
+            let tmp = cp_path.with_extension("tmp");
+            if let Ok(json) = serde_json::to_string_pretty(&checkpoint) {
+                let _ = std::fs::write(&tmp, json);
+                let _ = std::fs::rename(&tmp, &cp_path);
+            }
+        }
+    }
+
+    fn on_run(&self, start: u64, length: usize) {
+        // Update run distribution
+        {
+            let mut dist = self.run_distribution.lock().unwrap();
+            *dist.entry(length).or_insert(0) += 1;
+        }
+
+        // Track longest run
+        let prev = self.longest_run.load(Ordering::Relaxed);
+        if (length as u64) > prev {
+            self.longest_run.store(length as u64, Ordering::Relaxed);
+            self.longest_run_start.store(start, Ordering::Relaxed);
+            log::info!("New longest run: {} at n={}", length, start);
+        }
+    }
+
+    fn track_runs(&self) -> bool {
+        true
+    }
+
+    fn min_run_length(&self) -> usize {
+        self.significant_run_threshold
     }
 }
 
@@ -510,8 +599,15 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(0);
     }
 
-    // Normal mode: RecordingHooks for checkpointing and witness tracking
-    let hooks = RecordingHooks::new(config.output_dir.clone(), config.target_k as u64);
+    // Normal mode: RecordingHooks for full recording (checkpoints, runs, coverage)
+    let checkpoint_interval_chunks = (config.checkpoint_interval / 1_048_576).max(1);
+    let hooks = RecordingHooks::new(
+        config.output_dir.clone(),
+        config.target_k as u64,
+        config.start,
+        config.significant_run_threshold,
+        checkpoint_interval_chunks,
+    );
     let result = erdos396::sieve_solver::solve(
         config.target_k as u64,
         config.start,
@@ -524,10 +620,24 @@ fn main() -> anyhow::Result<()> {
     );
 
     let sec = result.duration.as_secs_f64();
-    let candidates = config.end - config.start;
-    let speed = candidates as f64 / sec / 1e6;
+    let range_size = config.end - config.start;
+    let speed = range_size as f64 / sec / 1e6;
     let witnesses = hooks.witnesses.lock().unwrap();
     let false_positives = hooks.false_positives.load(Ordering::Relaxed);
+    let total_checked = hooks.total_checked.load(Ordering::Relaxed);
+    let longest_run = hooks.longest_run.load(Ordering::Relaxed);
+    let longest_run_start = hooks.longest_run_start.load(Ordering::Relaxed);
+    let run_dist = hooks.run_distribution.lock().unwrap();
+
+    // Coverage invariant verification
+    let expected_checked = range_size;
+    let expected_sum = sum_range_u128(config.start, config.end);
+    let expected_xor = xor_range(config.start, config.end);
+    let actual_sum = *hooks.sum_checked.lock().unwrap();
+    let actual_xor = hooks.xor_checked.load(Ordering::Relaxed);
+
+    let coverage_ok =
+        total_checked == expected_checked && actual_sum == expected_sum && actual_xor == expected_xor;
 
     println!();
     println!("======================================================================");
@@ -535,13 +645,35 @@ fn main() -> anyhow::Result<()> {
     println!("======================================================================");
     println!("  Target k: {}", config.target_k);
     println!("  Range: [{}, {})", config.start, config.end);
+    println!(
+        "  Range size: {} ({:.2}B)",
+        range_size,
+        range_size as f64 / 1e9
+    );
     println!("  Workers: {}", config.num_workers);
     println!("  Duration: {:.3}s", sec);
     println!("  Throughput: {:.1} M/s", speed);
+    println!();
+    println!("  Total checked: {}", total_checked);
+    println!("  Coverage: {}", if coverage_ok { "VERIFIED" } else { "MISMATCH" });
+    if !coverage_ok {
+        eprintln!(
+            "  WARNING: coverage mismatch — checked={} (expected {}), sum={} (expected {}), xor={} (expected {})",
+            total_checked, expected_checked, actual_sum, expected_sum, actual_xor, expected_xor
+        );
+    }
+    println!();
+    println!("  Longest run: {} at n={}", longest_run, longest_run_start);
     println!("  Witnesses found: {}", witnesses.len());
     println!("  False positives: {}", false_positives);
-    if result.min_witness < u64::MAX {
-        println!("  Minimum witness: n={}", result.min_witness);
+    if !run_dist.is_empty() {
+        println!();
+        println!("*** RUN LENGTH DISTRIBUTION ***");
+        let mut sorted: Vec<_> = run_dist.iter().collect();
+        sorted.sort_by_key(|(&len, _)| len);
+        for (&len, &count) in &sorted {
+            println!("  Run of {:>3}: {:>10} occurrences", len, count);
+        }
     }
     if !witnesses.is_empty() {
         println!();
@@ -551,6 +683,37 @@ fn main() -> anyhow::Result<()> {
         }
     }
     println!("======================================================================");
+
+    // Write final search report JSON
+    let _ = std::fs::create_dir_all(&config.output_dir);
+    let report_path = config.output_dir.join(format!(
+        "search_report_k{}_{}_{}.json",
+        config.target_k, config.start, config.end
+    ));
+    let report = serde_json::json!({
+        "version": "sieve_solver_report_v1",
+        "target_k": config.target_k,
+        "start": config.start,
+        "end": config.end,
+        "workers": config.num_workers,
+        "total_checked": total_checked,
+        "expected_checked": expected_checked,
+        "coverage_verified": coverage_ok,
+        "longest_run": longest_run,
+        "longest_run_start": longest_run_start,
+        "witnesses": *witnesses,
+        "false_positives": false_positives,
+        "run_distribution": *run_dist,
+        "duration_secs": sec,
+        "rate_per_sec": speed * 1e6,
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Ok(json) = serde_json::to_string_pretty(&report) {
+        let tmp = report_path.with_extension("tmp");
+        let _ = std::fs::write(&tmp, &json);
+        let _ = std::fs::rename(&tmp, &report_path);
+        log::info!("Wrote search report to {}", report_path.display());
+    }
 
     if !witnesses.is_empty() {
         std::process::exit(0);

@@ -293,7 +293,8 @@ fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
 /// Callbacks emitted by the solver at strategic points.
 ///
 /// Implementations can record checkpoints, log runs, track statistics, etc.
-/// With monomorphization, [`NoOpHooks`] compiles to zero overhead.
+/// With monomorphization, [`NoOpHooks`] compiles to zero overhead — the
+/// compiler eliminates all hook calls and the `smooth[]` allocation.
 ///
 /// All methods have no-op defaults so implementors only override what they need.
 /// Methods are called from worker threads and must be `Send + Sync`.
@@ -307,6 +308,17 @@ pub trait SolverHooks: Send + Sync {
     /// A worker finished processing a chunk covering `[chunk_start, chunk_end)`.
     /// Called once per chunk per worker. Useful for checkpointing and progress.
     fn on_chunk_done(&self, _chunk_start: u64, _chunk_end: u64) {}
+
+    /// A run of `length` consecutive smooth numbers was found starting at `start`.
+    /// Only called when [`track_runs`](SolverHooks::track_runs) returns true.
+    fn on_run(&self, _start: u64, _length: usize) {}
+
+    /// Whether to track all runs (adds a per-chunk linear scan, ~20% overhead).
+    /// Returns false by default (bench mode). Override to true for normal mode.
+    fn track_runs(&self) -> bool { false }
+
+    /// Minimum run length to report via [`on_run`](SolverHooks::on_run).
+    fn min_run_length(&self) -> usize { 2 }
 }
 
 /// No-op hooks — zero overhead after monomorphization. Used for bench mode.
@@ -413,6 +425,14 @@ pub fn solve<H: SolverHooks>(
                 let num_buckets = (CHUNK_SIZE as u32).div_ceil(BLOCK_SIZE) + 1;
                 let mut buckets: Vec<FastBucket> =
                     (0..num_buckets).map(|_| FastBucket::new()).collect();
+
+                // Per-chunk smooth array for run tracking (only allocated when needed)
+                let do_track_runs = hooks.track_runs();
+                let mut smooth: Vec<bool> = if do_track_runs {
+                    vec![false; CHUNK_SIZE as usize]
+                } else {
+                    vec![]
+                };
 
                 loop {
                     let chunk_id = current_chunk.fetch_add(1, Relaxed);
@@ -605,6 +625,18 @@ pub fn solve<H: SolverHooks>(
                             }
                         }
 
+                        // Record smooth status for run tracking (before overlap copy)
+                        if do_track_runs {
+                            for j in 0..num_new as usize {
+                                let chunk_pos = block_start as usize + j;
+                                if chunk_pos < effective_chunk as usize {
+                                    smooth[chunk_pos] = unsafe {
+                                        *rem.as_ptr().add(overlap as usize + j)
+                                    } <= 1;
+                                }
+                            }
+                        }
+
                         // Carry overlap for cross-boundary detection
                         if w_search >= k32 {
                             let src = (w_search - k32) as usize;
@@ -619,6 +651,29 @@ pub fn solve<H: SolverHooks>(
                         }
 
                         block_start += BLOCK_SIZE;
+                    }
+
+                    // Post-chunk: scan smooth[] for runs and report via hooks
+                    if do_track_runs {
+                        let min_run = hooks.min_run_length();
+                        let mut run_start = 0u64;
+                        let mut run_len = 0usize;
+                        for i in 0..effective_chunk as usize {
+                            if smooth[i] {
+                                if run_len == 0 {
+                                    run_start = l_chunk + i as u64;
+                                }
+                                run_len += 1;
+                            } else {
+                                if run_len >= min_run {
+                                    hooks.on_run(run_start, run_len);
+                                }
+                                run_len = 0;
+                            }
+                        }
+                        if run_len >= min_run {
+                            hooks.on_run(run_start, run_len);
+                        }
                     }
 
                     // Notify hooks that this chunk is done
