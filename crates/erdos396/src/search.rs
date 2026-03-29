@@ -669,15 +669,16 @@ impl SearchWorker {
             pos = batch_hi;
         }
 
-        if !self.bench_mode {
-            if current_run >= 2 {
-                if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
-                    run_logger.log_run(&run_info)?;
-                }
+        // Always update in-memory state (needed for boundary stitching).
+        if !self.bench_mode && current_run >= 2 {
+            if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
+                run_logger.log_run(&run_info)?;
             }
+        }
+        checkpoint.current_run = current_run;
+        checkpoint.current_run_start = run_start;
 
-            checkpoint.current_run = current_run;
-            checkpoint.current_run_start = run_start;
+        if !self.bench_mode {
             run_logger.flush()?;
             checkpoint.touch();
             checkpoint.save_atomic_slim(checkpoint_path)?;
@@ -778,15 +779,16 @@ impl SearchWorker {
             }
         }
 
-        if !self.bench_mode {
-            if current_run >= 2 {
-                if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
-                    run_logger.log_run(&run_info)?;
-                }
+        // Always update in-memory state (needed for boundary stitching).
+        if !self.bench_mode && current_run >= 2 {
+            if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
+                run_logger.log_run(&run_info)?;
             }
+        }
+        checkpoint.current_run = current_run;
+        checkpoint.current_run_start = run_start;
 
-            checkpoint.current_run = current_run;
-            checkpoint.current_run_start = run_start;
+        if !self.bench_mode {
             run_logger.flush()?;
             checkpoint.touch();
             checkpoint.save_atomic_slim(checkpoint_path)?;
@@ -2218,6 +2220,57 @@ mod tests {
         assert_eq!(
             migrated_cp.version, 5,
             "Checkpoint should be upgraded to v5"
+        );
+    }
+
+    #[test]
+    fn test_bench_mode_processes_full_range() {
+        let dir = tempdir().unwrap();
+
+        let config = SearchConfig {
+            target_k: 8,
+            start: 339_949_244,
+            end: 339_949_253,
+            num_workers: 2,
+            checkpoint_interval: 1_000_000,
+            output_dir: dir.path().to_path_buf(),
+            significant_run_threshold: 6,
+            verify_candidates: true,
+            report_interval: Duration::from_secs(60),
+            no_prefilter: false,
+            full_verify: true,
+            safety_net: false,
+            fused_self_check_samples: 0,
+            fused_audit_interval: 0,
+            bench_secs: 999.0,
+        };
+
+        let result = parallel_search(&config).unwrap();
+
+        // Bench mode should still find the k=8 witness
+        assert!(
+            result.witnesses.contains(&339_949_252),
+            "Bench mode should find k=8 witness at n=339,949,252, got: {:?}",
+            result.witnesses
+        );
+
+        // Should process entire range
+        assert_eq!(
+            result.total_checked,
+            config.end - config.start,
+            "Bench mode should check entire range"
+        );
+
+        // No checkpoint files should be written in the real output dir
+        let checkpoint_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+            .collect();
+        assert!(
+            checkpoint_files.is_empty(),
+            "Bench mode should not write checkpoint files to output dir, found: {:?}",
+            checkpoint_files
         );
     }
 }
