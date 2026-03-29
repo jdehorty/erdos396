@@ -399,62 +399,62 @@ fn main() -> anyhow::Result<()> {
     }
 
     if !bench_mode {
-    // Print configuration
-    println!("Erdős 396 Search Configuration:");
-    println!("  Target k: {}", config.target_k);
-    println!("  Range: [{}, {})", config.start, config.end);
-    println!(
-        "  Range size: {} ({:.2}B)",
-        config.end - config.start,
-        (config.end - config.start) as f64 / 1e9
-    );
-    println!("  Workers: {}", config.num_workers);
-    println!(
-        "  Prefilter: {}",
-        if config.no_prefilter {
-            "DISABLED"
-        } else {
-            "ENABLED (sqrt(2n) barrier + odd prime exclusion)"
+        // Print configuration
+        println!("Erdős 396 Search Configuration:");
+        println!("  Target k: {}", config.target_k);
+        println!("  Range: [{}, {})", config.start, config.end);
+        println!(
+            "  Range size: {} ({:.2}B)",
+            config.end - config.start,
+            (config.end - config.start) as f64 / 1e9
+        );
+        println!("  Workers: {}", config.num_workers);
+        println!(
+            "  Prefilter: {}",
+            if config.no_prefilter {
+                "DISABLED"
+            } else {
+                "ENABLED (sqrt(2n) barrier + odd prime exclusion)"
+            }
+        );
+        if !config.no_prefilter {
+            if config.fused_self_check_samples > 0 {
+                println!(
+                    "  Fused self-check: {} samples/worker",
+                    config.fused_self_check_samples
+                );
+            }
+            if config.fused_audit_interval > 0 {
+                println!(
+                    "  Fused audit interval: {} checked values/worker",
+                    config.fused_audit_interval
+                );
+            }
         }
-    );
-    if !config.no_prefilter {
-        if config.fused_self_check_samples > 0 {
-            println!(
-                "  Fused self-check: {} samples/worker",
-                config.fused_self_check_samples
-            );
-        }
-        if config.fused_audit_interval > 0 {
-            println!(
-                "  Fused audit interval: {} checked values/worker",
-                config.fused_audit_interval
-            );
-        }
-    }
-    println!(
-        "  Verify mode: {}",
-        if config.full_verify {
-            "full (all primes)"
-        } else {
-            "fast (small primes only)"
-        }
-    );
-    println!(
-        "  Significant run threshold: {}",
-        config.significant_run_threshold
-    );
-    println!(
-        "  Safety-net: {}",
-        if config.safety_net {
-            "ENABLED"
-        } else {
-            "disabled"
-        }
-    );
-    println!("  Checkpoint interval: {}", config.checkpoint_interval);
-    println!("  Output directory: {:?}", config.output_dir);
-    println!("  Verify candidates: {}", config.verify_candidates);
-    println!();
+        println!(
+            "  Verify mode: {}",
+            if config.full_verify {
+                "full (all primes)"
+            } else {
+                "fast (small primes only)"
+            }
+        );
+        println!(
+            "  Significant run threshold: {}",
+            config.significant_run_threshold
+        );
+        println!(
+            "  Safety-net: {}",
+            if config.safety_net {
+                "ENABLED"
+            } else {
+                "disabled"
+            }
+        );
+        println!("  Checkpoint interval: {}", config.checkpoint_interval);
+        println!("  Output directory: {:?}", config.output_dir);
+        println!("  Verify candidates: {}", config.verify_candidates);
+        println!();
     } // end if !bench_mode
 
     // Run search

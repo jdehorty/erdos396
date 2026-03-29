@@ -176,6 +176,85 @@ bench impl="rust":
 bench-rust: (bench "rust")
 bench-cpp: (bench "cpp")
 
+# Benchmark the main erdos396 crate (fused sieve path).
+# Uses the same k=8..13 sweep ranges as bench-rust/bench-cpp for
+# direct throughput comparison.
+bench-erdos396:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    THREADS="{{threads}}"
+
+    echo "  Building erdos396 (release, target-cpu=native)..." >&2
+    RUSTFLAGS="-C target-cpu=native" cargo build -p erdos396 --release 2>&1 | tail -1
+    BIN="../../target/release/erdos396"
+    COMPILER=$(rustc --version 2>/dev/null || echo "unknown")
+    OUT="bench-erdos396.md"
+
+    # Detect environment
+    if [[ "$(uname)" == "Darwin" ]]; then
+        cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
+        mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+        mem="$(( mem_bytes / 1073741824 )) GB"
+        os_info="$(sw_vers -productName 2>/dev/null || echo macOS) $(sw_vers -productVersion 2>/dev/null || echo "")"
+    else
+        cpu=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "unknown")
+        mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+        mem="$(( mem_kb / 1048576 )) GB"
+        os_info=$(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"' || echo "Linux")
+    fi
+    git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    timestamp=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+    {
+        echo "# erdos396 Benchmark (fused sieve)"
+        echo ""
+        echo "Steady-state throughput at each k's witness position. Same ranges as"
+        echo "search-lab bench for direct comparison."
+        echo ""
+        echo "## Environment"
+        echo ""
+        echo "| | |"
+        echo "|---|---|"
+        echo "| **CPU** | $cpu |"
+        echo "| **Memory** | $mem |"
+        echo "| **OS** | $os_info |"
+        echo "| **Threads** | $THREADS |"
+        echo "| **Compiler** | \`$COMPILER\` |"
+        echo "| **Commit** | \`$git_hash\` |"
+        echo "| **Date** | $timestamp |"
+        echo ""
+        echo "## Results"
+        echo ""
+        echo "| k | Range | Candidates | Witnesses | Time (s) | Throughput (M/s) |"
+        echo "|--:|:------|-----------:|----------:|---------:|-----------------:|"
+    } | tee "$OUT"
+
+    # Same sweep ranges as bench-rust/bench-cpp
+    declare -A STARTS ENDS
+    STARTS[8]=169974626;          ENDS[8]=18509923878
+    STARTS[9]=509773922;          ENDS[9]=19029321766
+    STARTS[10]=8804882497;        ENDS[10]=25749999991
+    STARTS[11]=1062858041585;     ENDS[11]=1078999999999
+    STARTS[12]=5042391644646;     ENDS[12]=5055499999999
+    STARTS[13]=18247629921842;    ENDS[13]=18258749999999
+
+    for K in 8 9 10 11 12 13; do
+        START="${STARTS[$K]}"
+        END="${ENDS[$K]}"
+        echo "  k=$K: [$START, $END)..." >&2
+
+        "$BIN" -k "$K" --start "$START" --end "$END" \
+            -w "$THREADS" --bench 999 2>/dev/null \
+            | python3 parse_bench.py - >> "$OUT" || true
+    done
+
+    echo "" | tee -a "$OUT"
+    echo "Results written to: $OUT" >&2
+
+    # Clean up transient files
+    rm -f checkpoints/search_report_*.json 2>/dev/null || true
+    rm -rf checkpoints 2>/dev/null || true
+
 # ─── Clean ────────────────────────────────────────────────────────────
 
 # Remove build artifacts
