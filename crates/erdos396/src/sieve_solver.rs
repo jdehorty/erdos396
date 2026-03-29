@@ -575,6 +575,7 @@ pub fn solve(
                                         &prime_data[..chunk_total_primes],
                                     )
                                 {
+                                    witness_count.fetch_add(1, Relaxed);
                                     let mut current = global_min_n.load(Relaxed);
                                     while cand_n < current {
                                         match global_min_n.compare_exchange_weak(

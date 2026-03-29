@@ -390,48 +390,13 @@ fn main() -> anyhow::Result<()> {
 
     let bench_mode = config.bench_secs > 0.0;
 
-    if bench_mode {
-        // Bench mode: use high-performance sieve solver (search-lab architecture)
-        eprintln!(
-            "# erdos396 bench (sieve_solver)  k={}  range=[{}, {})  workers={}",
-            config.target_k, config.start, config.end, config.num_workers
-        );
-
-        let t0 = std::time::Instant::now();
-        let prime_limit = {
-            let max_n = config.end + config.target_k as u64;
-            ((2.0 * max_n as f64).sqrt() as u64).max(2 * config.target_k as u64) + 1000
-        };
-        let prime_data = erdos396::sieve_solver::build_solver_primes(prime_limit);
-        eprintln!(
-            "# primes: {} in {:.3}s",
-            prime_data.len(),
-            t0.elapsed().as_secs_f64()
-        );
-
-        let result = erdos396::sieve_solver::solve(
-            config.target_k as u64,
-            config.start,
-            config.end,
-            &prime_data,
-            config.num_workers as u32,
-            config.bench_secs,
-            false, // progress
-        );
-
-        let sec = result.duration.as_secs_f64();
-        let checked = result.chunks_processed * 1_048_576;
-        let speed = checked as f64 / sec / 1e6;
-        println!(
-            "R\t{}\tbench\t{:.4}\t{}\t{:.2}\t{}",
-            config.target_k, sec, checked, speed, result.witness_count
-        );
-        std::process::exit(0);
-    }
-
-    if !bench_mode {
-        // Print configuration
-        println!("Erdős 396 Search Configuration:");
+    // Use --no-prefilter for the legacy parallel_search path (with full
+    // checkpointing, run logging, safety-net, and detailed statistics).
+    // Otherwise use the high-performance sieve_solver for both bench and
+    // normal mode.
+    if config.no_prefilter {
+        // Legacy path: full-featured parallel_search
+        println!("Erdős 396 Search Configuration (legacy path):");
         println!("  Target k: {}", config.target_k);
         println!("  Range: [{}, {})", config.start, config.end);
         println!(
@@ -440,69 +405,88 @@ fn main() -> anyhow::Result<()> {
             (config.end - config.start) as f64 / 1e9
         );
         println!("  Workers: {}", config.num_workers);
-        println!(
-            "  Prefilter: {}",
-            if config.no_prefilter {
-                "DISABLED"
-            } else {
-                "ENABLED (sqrt(2n) barrier + odd prime exclusion)"
-            }
-        );
-        if !config.no_prefilter {
-            if config.fused_self_check_samples > 0 {
-                println!(
-                    "  Fused self-check: {} samples/worker",
-                    config.fused_self_check_samples
-                );
-            }
-            if config.fused_audit_interval > 0 {
-                println!(
-                    "  Fused audit interval: {} checked values/worker",
-                    config.fused_audit_interval
-                );
-            }
-        }
-        println!(
-            "  Verify mode: {}",
-            if config.full_verify {
-                "full (all primes)"
-            } else {
-                "fast (small primes only)"
-            }
-        );
-        println!(
-            "  Significant run threshold: {}",
-            config.significant_run_threshold
-        );
-        println!(
-            "  Safety-net: {}",
-            if config.safety_net {
-                "ENABLED"
-            } else {
-                "disabled"
-            }
-        );
-        println!("  Checkpoint interval: {}", config.checkpoint_interval);
-        println!("  Output directory: {:?}", config.output_dir);
-        println!("  Verify candidates: {}", config.verify_candidates);
+        println!("  Prefilter: DISABLED (linear governor check)");
         println!();
-    } // end if !bench_mode
 
-    // Run search (normal mode — bench mode already handled above)
-    let result = parallel_search(&config)?;
-
-    // Normal mode: print results and write report
-    print_results(&result, &config);
-    if let Err(e) = write_search_report(&config, &result) {
-        eprintln!("ERROR: failed to write search report: {e}");
-        std::process::exit(2);
+        let result = parallel_search(&config)?;
+        print_results(&result, &config);
+        if let Err(e) = write_search_report(&config, &result) {
+            eprintln!("ERROR: failed to write search report: {e}");
+            std::process::exit(2);
+        }
+        if !result.witnesses.is_empty() {
+            std::process::exit(0);
+        } else {
+            std::process::exit(1);
+        }
     }
 
-    // Exit with appropriate code
-    if !result.witnesses.is_empty() {
-        std::process::exit(0); // Found witness!
+    // High-performance sieve solver (search-lab architecture)
+    let mode_label = if bench_mode { "bench" } else { "search" };
+    eprintln!(
+        "# erdos396 {} (sieve_solver)  k={}  range=[{}, {})  workers={}",
+        mode_label, config.target_k, config.start, config.end, config.num_workers
+    );
+
+    let t0 = std::time::Instant::now();
+    let prime_limit = {
+        let max_n = config.end + config.target_k as u64;
+        ((2.0 * max_n as f64).sqrt() as u64).max(2 * config.target_k as u64) + 1000
+    };
+    let prime_data = erdos396::sieve_solver::build_solver_primes(prime_limit);
+    eprintln!(
+        "# primes: {} in {:.3}s",
+        prime_data.len(),
+        t0.elapsed().as_secs_f64()
+    );
+
+    let result = erdos396::sieve_solver::solve(
+        config.target_k as u64,
+        config.start,
+        config.end,
+        &prime_data,
+        config.num_workers as u32,
+        config.bench_secs,
+        !bench_mode, // progress reporting for normal mode
+    );
+
+    let sec = result.duration.as_secs_f64();
+    let candidates = if config.end < u64::MAX {
+        config.end - config.start
     } else {
-        std::process::exit(1); // No witness found
+        result.chunks_processed * 1_048_576
+    };
+    let speed = candidates as f64 / sec / 1e6;
+
+    if bench_mode {
+        // Universal Benchmark Contract: R-line to stdout
+        let checked = result.chunks_processed * 1_048_576;
+        println!(
+            "R\t{}\tbench\t{:.4}\t{}\t{:.2}\t{}",
+            config.target_k, sec, checked, speed, result.witness_count
+        );
+    } else {
+        // Normal mode: human-readable output
+        println!();
+        println!("======================================================================");
+        println!("Search Complete (sieve_solver)");
+        println!("======================================================================");
+        println!("  Target k: {}", config.target_k);
+        println!("  Range: [{}, {})", config.start, config.end);
+        println!("  Workers: {}", config.num_workers);
+        println!("  Duration: {:.3}s", sec);
+        println!("  Throughput: {:.1} M/s", speed);
+        println!("  Witnesses found: {}", result.witness_count);
+        if result.min_witness < u64::MAX {
+            println!("  Minimum witness: n={}", result.min_witness);
+        }
+        println!("======================================================================");
+    }
+
+    if result.witness_count > 0 {
+        std::process::exit(0);
+    } else {
+        std::process::exit(1);
     }
 }
 
