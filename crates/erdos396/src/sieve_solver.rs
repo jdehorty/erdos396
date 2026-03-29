@@ -76,7 +76,7 @@ fn isqrt_u64(n: u64) -> u64 {
 // Const-generic strip with offset tracking (matches search-lab)
 // ---------------------------------------------------------------------------
 #[inline(always)]
-fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64, _block_l: u64) {
+fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64, block_l: u64) {
     const fn inv_p_const(p: u64) -> u64 {
         let mut inv = p.wrapping_mul(3) ^ 2;
         inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
@@ -97,19 +97,26 @@ fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64, _
     while j < w_block {
         unsafe {
             let r = *rem.add(j as usize);
-            if r != 0 {
-                let mut temp = r.wrapping_mul(inv);
-                let mut q = temp.wrapping_mul(inv);
-                if q <= limit {
+            if r == 0 { j += P; continue; }
+            let mut temp = r.wrapping_mul(inv);
+            let mut exp = 1u32;
+            let mut q = temp.wrapping_mul(inv);
+            if q <= limit {
+                temp = q;
+                exp += 1;
+                loop {
+                    q = temp.wrapping_mul(inv);
+                    if q > limit { break; }
                     temp = q;
-                    loop {
-                        q = temp.wrapping_mul(inv);
-                        if q > limit {
-                            break;
-                        }
-                        temp = q;
-                    }
+                    exp += 1;
                 }
+            }
+            // Inline v_p check
+            let n = block_l + j;
+            let supply = vp_central_binom_dispatch(n, P);
+            if (exp as u64) > supply {
+                *rem.add(j as usize) = 0;
+            } else {
                 *rem.add(j as usize) = temp;
             }
         }
@@ -129,25 +136,32 @@ fn process_prime_dyn(
     start_j: &mut u64,
     w_block: u64,
     rem: *mut u64,
-    _block_l: u64,
+    block_l: u64,
 ) {
     let mut j = *start_j;
     while j < w_block {
         unsafe {
             let r = *rem.add(j as usize);
-            if r != 0 {
-                let mut temp = r.wrapping_mul(inv_p);
-                let mut q = temp.wrapping_mul(inv_p);
-                if q <= max_quot {
+            if r == 0 { j += p; continue; }
+            let mut temp = r.wrapping_mul(inv_p);
+            let mut exp = 1u32;
+            let mut q = temp.wrapping_mul(inv_p);
+            if q <= max_quot {
+                temp = q;
+                exp += 1;
+                loop {
+                    q = temp.wrapping_mul(inv_p);
+                    if q > max_quot { break; }
                     temp = q;
-                    loop {
-                        q = temp.wrapping_mul(inv_p);
-                        if q > max_quot {
-                            break;
-                        }
-                        temp = q;
-                    }
+                    exp += 1;
                 }
+            }
+            // Inline v_p check
+            let n = block_l + j;
+            let supply = vp_central_binom_dispatch(n, p);
+            if (exp as u64) > supply {
+                *rem.add(j as usize) = 0;
+            } else {
                 *rem.add(j as usize) = temp;
             }
         }
