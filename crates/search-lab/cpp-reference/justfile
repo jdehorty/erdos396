@@ -2,17 +2,10 @@ cxx := env("CXX", "g++")
 cxxflags := "-std=c++20 -O3 -march=native -mtune=native -flto -funroll-loops -fomit-frame-pointer -fno-exceptions -fno-rtti -DNDEBUG -pthread -Wall -Wextra -Wpedantic"
 ldflags := "-flto -pthread"
 
-# Build the C++ port
+# Build Sharvil's reference implementation
 build:
-    {{cxx}} {{cxxflags}} -o erdos396_port main.cpp {{ldflags}}
-
-# Build Sharvil's original reference implementation
-build-ref:
     {{cxx}} {{cxxflags}} -o erdos396_ref erdos_problem_396.cpp {{ldflags}}
-
-# Build both C++ binaries
-build-all: build build-ref
 
 # Remove build artifacts
 clean:
-    rm -f erdos396_port erdos396_ref
+    rm -f erdos396_ref

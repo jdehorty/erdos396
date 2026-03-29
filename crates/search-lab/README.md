@@ -17,10 +17,9 @@ search-lab/
 ├── bench-rust.md       Baseline Rust benchmark results
 ├── src/main.rs         Rust implementation
 └── cpp-reference/
-    ├── main.cpp                  C++ port
-    ├── erdos_problem_396.cpp     Reference implementation by Sharvil Kesarwani
+    ├── erdos_problem_396.cpp     C++ reference implementation by Sharvil Kesarwani
     ├── justfile
-    └── README.md                 C++ source attribution and notes
+    └── README.md                 Attribution and notes
 ```
 
 ## Building
