@@ -887,11 +887,11 @@ fn main() {
 
         if bench_secs > 0.0 {
             // In bench mode: don't chain k values, don't checkpoint
-        } else {
-            if ans < u64::MAX {
-                start_l = ans;
-            }
+        } else if ans < u64::MAX {
+            start_l = ans;
             write_checkpoint(k + 1, start_l);
+        } else {
+            break;
         }
     }
 
