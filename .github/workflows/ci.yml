@@ -39,5 +39,18 @@ jobs:
         run: |
           curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      # Restore Lake workspace (packages + local build) when toolchain/manifest unchanged.
+      - name: Cache Lake workspace (formal/.lake)
+        uses: actions/cache@v4
+        with:
+          path: formal/.lake
+          key: lake-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('formal/lean-toolchain', 'formal/lake-manifest.json') }}-${{ github.sha }}
+          restore-keys: |
+            lake-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('formal/lean-toolchain', 'formal/lake-manifest.json') }}-
+      # Download precompiled Mathlib/.olean artifacts from the community cache (do not compile Mathlib).
+      - name: Fetch Mathlib cache
+        working-directory: formal
+        run: lake exe cache get
       - name: Build Lean formalization
-        run: cd formal && lake build
+        working-directory: formal
+        run: lake build
