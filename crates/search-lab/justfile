@@ -18,10 +18,17 @@ build: build-rust build-cpp
 
 # ─── Benchmark ────────────────────────────────────────────────────────
 #
-# All benchmarks run k=8, k=9, k=10 over the known witness ranges:
-#   k=8:  [1, 339_949_253)                witness at 339_949_252
-#   k=9:  [339_949_252, 1_019_547_845)    witness at 1_019_547_844
-#   k=10: [1_019_547_844, 17_609_764_995) witness at 17_609_764_994
+# Benchmarks run k=8, k=9, k=10 over full witness ranges, plus k=13
+# over a representative 10B-candidate slice at production scale.
+#
+# Known witnesses:
+#   k=8:  339_949_252
+#   k=9:  1_019_547_844
+#   k=10: 17_609_764_994
+#   k=13: 18_253_129_921_842
+#
+# NOTE: Run bench-rust and bench-cpp separately (not via `just bench`)
+# to avoid thermal throttling from back-to-back CPU saturation.
 
 # Benchmark Rust implementation
 bench-rust: build-rust
@@ -49,10 +56,9 @@ bench-rust: build-rust
     {
         echo "# search-lab Benchmark (Rust)"
         echo ""
-        echo "Measures wall-clock throughput of the witness search over the known"
-        echo "witness ranges for k=8, k=9, and k=10. These ranges reproduce the"
-        echo "same search space traversed by the C++ reference implementation,"
-        echo "providing a standardized baseline for comparing optimizations."
+        echo "Measures wall-clock throughput of the witness search. k=8, k=9, k=10"
+        echo "run over the full known witness ranges. k=13 runs a 10B-candidate"
+        echo "slice at production scale (sieve_limit ~ 6M primes)."
         echo ""
         echo "## Environment"
         echo ""
@@ -93,6 +99,7 @@ bench-rust: build-rust
     bench 8  1          339949253
     bench 9  339949252  1019547845
     bench 10 1019547844 17609764995
+    bench 13 18243129921842 18253129921843
 
     echo "" | tee -a "$OUT"
     echo "Results written to: $OUT" >&2
@@ -119,21 +126,16 @@ bench-cpp: build-cpp
     cxx_ver=$(${CXX:-g++} --version 2>/dev/null | head -1 || echo "unknown")
     git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     timestamp=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-
-    # Sharvil's binary has no CLI flags. It reads checkpoint-396.txt to
-    # determine where to resume. We seed it at k=8, start=1 so it naturally
-    # traverses the same ranges: k=8 [1..], k=9 [339M..], k=10 [1019M..].
-    # The binary reports its own per-k timing, which we parse.
-    # Thread count is hardcoded to hardware_concurrency() in the binary.
     hw_threads=$(python3 -c "import os; print(os.cpu_count() or '?')")
 
     {
         echo "# search-lab Benchmark (C++ reference, Sharvil Kesarwani)"
         echo ""
-        echo "Measures wall-clock throughput of the witness search over the known"
-        echo "witness ranges for k=8, k=9, and k=10. These ranges reproduce the"
-        echo "same search space traversed by the C++ reference implementation,"
-        echo "providing a standardized baseline for comparing optimizations."
+        echo "Measures wall-clock throughput of the witness search. k=8, k=9, k=10"
+        echo "run over the full known witness ranges. k=13 runs a 10B-candidate"
+        echo "slice at production scale (sieve_limit ~ 6M primes)."
+        echo ""
+        echo "Note: thread count is hardcoded to hardware_concurrency() in the binary."
         echo ""
         echo "## Environment"
         echo ""
@@ -142,7 +144,7 @@ bench-cpp: build-cpp
         echo "| **CPU** | $cpu |"
         echo "| **Memory** | $mem |"
         echo "| **OS** | $os_info |"
-        echo "| **Threads** | $hw_threads (hardcoded to hardware_concurrency) |"
+        echo "| **Threads** | $hw_threads |"
         echo "| **C++** | \`$cxx_ver\` |"
         echo "| **Commit** | \`$git_hash\` |"
         echo "| **Date** | $timestamp |"
@@ -154,12 +156,10 @@ bench-cpp: build-cpp
     } | tee "$OUT"
 
     # Known ranges for table formatting
-    declare -A STARTS=([8]=1 [9]=339949252 [10]=1019547844)
-    declare -A ENDS=([8]=339949253 [9]=1019547845 [10]=17609764995)
+    declare -A STARTS=([8]=1 [9]=339949252 [10]=1019547844 [13]=18243129921842)
+    declare -A ENDS=([8]=339949253 [9]=1019547845 [10]=17609764995 [13]=18253129921843)
 
-    # Seed checkpoint so it starts at k=8 from position 1.
-    # The binary writes per-k results to results-396.txt as it goes.
-    # We poll that file and kill the process once k=10 completes.
+    # --- Phase 1: k=8,9,10 via natural chaining ---
     rm -f cpp-reference/results-396.txt
     echo "8 1" > cpp-reference/checkpoint-396.txt
 
@@ -168,17 +168,13 @@ bench-cpp: build-cpp
     cd cpp-reference
     ./erdos396_ref > /dev/null 2>&1 &
     PID=$!
-
-    # Poll results file for k=10 completion, then stop
     while ! grep -q "^k = 10" results-396.txt 2>/dev/null; do
         sleep 0.2
     done
     kill $PID 2>/dev/null || true
     wait $PID 2>/dev/null || true
-
     cd ..
 
-    # Parse the first 3 result lines from the file (k=8, k=9, k=10)
     head -3 cpp-reference/results-396.txt | while IFS='|' read -r k_field n_field time_field speed_field; do
         k=$(echo "$k_field" | tr -dc '0-9')
         elapsed=$(echo "$time_field" | grep -oE '[0-9]+\.[0-9]+')
@@ -193,6 +189,37 @@ bench-cpp: build-cpp
         echo "| $k | \`[$start, $end)\` | $range_fmt | $elapsed | $speed |"
     done >> "$OUT"
 
+    # --- Phase 2: k=13 via checkpoint at 10B before witness ---
+    rm -f cpp-reference/results-396.txt
+    echo "13 18243129921842" > cpp-reference/checkpoint-396.txt
+
+    echo "  Running k=13 [18.243T, 18.253T) (seeded via checkpoint)..." >&2
+
+    cd cpp-reference
+    ./erdos396_ref > /dev/null 2>&1 &
+    PID=$!
+    while ! grep -q "^k = 13" results-396.txt 2>/dev/null; do
+        sleep 0.5
+    done
+    kill $PID 2>/dev/null || true
+    wait $PID 2>/dev/null || true
+    cd ..
+
+    # Parse k=13 result
+    grep "^k = 13" cpp-reference/results-396.txt | head -1 | while IFS='|' read -r k_field n_field time_field speed_field; do
+        k=13
+        elapsed=$(echo "$time_field" | grep -oE '[0-9]+\.[0-9]+')
+        speed=$(echo "$speed_field" | grep -oE '[0-9]+\.[0-9]+')
+
+        start=${STARTS[$k]}
+        end=${ENDS[$k]}
+        range=$(( end - start ))
+        range_fmt=$(python3 -c "print(f'{$range:,}')")
+
+        printf "  k=%-4s  %-36s  %ss  %s M/s\n" "$k" "[$start, $end)" "$elapsed" "$speed" >&2
+        echo "| $k | \`[$start, $end)\` | $range_fmt | $elapsed | $speed |"
+    done >> "$OUT"
+
     echo "" | tee -a "$OUT"
     echo "Results written to: $OUT" >&2
 
@@ -200,7 +227,7 @@ bench-cpp: build-cpp
     rm -f cpp-reference/checkpoint-396.txt cpp-reference/checkpoint-396.tmp \
           cpp-reference/results-396.txt 2>/dev/null || true
 
-# Benchmark both implementations
+# Benchmark both implementations (NOTE: run separately for accurate thermal results)
 bench: bench-rust bench-cpp
 
 # ─── Clean ────────────────────────────────────────────────────────────
