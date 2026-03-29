@@ -294,6 +294,9 @@ pub struct SearchWorker {
 
     /// Periodic audit interval for fused sieve cross-checks (0 disables).
     fused_audit_interval: u64,
+
+    /// Whether bench mode is active (skip all file I/O).
+    bench_mode: bool,
 }
 
 impl SearchWorker {
@@ -310,6 +313,7 @@ impl SearchWorker {
         prefilter_primes: Arc<Vec<u64>>,
         fused_self_check_samples: u32,
         fused_audit_interval: u64,
+        bench_mode: bool,
     ) -> Self {
         Self {
             id,
@@ -323,6 +327,7 @@ impl SearchWorker {
             prefilter_primes,
             fused_self_check_samples,
             fused_audit_interval,
+            bench_mode,
         }
     }
 
@@ -417,7 +422,8 @@ impl SearchWorker {
         };
 
         // If we weren't asked to stop early, assert full coverage of the worker range.
-        if result.is_ok() && !progress.should_stop.load(Ordering::Relaxed) {
+        // In bench mode, skip assertions (I/O is disabled and timer may fire early).
+        if result.is_ok() && !self.bench_mode && !progress.should_stop.load(Ordering::Relaxed) {
             let expected_checked = end.saturating_sub(start);
             let expected_sum = sum_range_u128(start, end);
             let expected_xor = xor_range(start, end);
@@ -568,7 +574,7 @@ impl SearchWorker {
                     }
                 } else {
                     prefix_complete = true;
-                    if current_run >= 2 {
+                    if !self.bench_mode && current_run >= 2 {
                         if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
                             run_logger.log_run(&run_info)?;
                         }
@@ -643,31 +649,35 @@ impl SearchWorker {
                     }
                 }
 
-                checkpoint_counter += 1;
-                if checkpoint_counter >= checkpoint_interval {
-                    checkpoint.current_run = current_run;
-                    checkpoint.current_run_start = run_start;
-                    run_logger.flush()?;
-                    checkpoint.touch();
-                    checkpoint.save_atomic_slim(checkpoint_path)?;
-                    checkpoint_counter = 0;
+                if !self.bench_mode {
+                    checkpoint_counter += 1;
+                    if checkpoint_counter >= checkpoint_interval {
+                        checkpoint.current_run = current_run;
+                        checkpoint.current_run_start = run_start;
+                        run_logger.flush()?;
+                        checkpoint.touch();
+                        checkpoint.save_atomic_slim(checkpoint_path)?;
+                        checkpoint_counter = 0;
+                    }
                 }
             }
 
             pos = batch_hi;
         }
 
-        if current_run >= 2 {
-            if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
-                run_logger.log_run(&run_info)?;
+        if !self.bench_mode {
+            if current_run >= 2 {
+                if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
+                    run_logger.log_run(&run_info)?;
+                }
             }
-        }
 
-        checkpoint.current_run = current_run;
-        checkpoint.current_run_start = run_start;
-        run_logger.flush()?;
-        checkpoint.touch();
-        checkpoint.save_atomic_slim(checkpoint_path)?;
+            checkpoint.current_run = current_run;
+            checkpoint.current_run_start = run_start;
+            run_logger.flush()?;
+            checkpoint.touch();
+            checkpoint.save_atomic_slim(checkpoint_path)?;
+        }
 
         log::info!(
             "Worker {} completed: checked {}, governors {}, longest run {} at {}",
@@ -743,7 +753,7 @@ impl SearchWorker {
                 }
             } else {
                 prefix_complete = true;
-                if current_run >= 2 {
+                if !self.bench_mode && current_run >= 2 {
                     if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
                         run_logger.log_run(&run_info)?;
                     }
@@ -751,28 +761,32 @@ impl SearchWorker {
                 current_run = 0;
             }
 
-            checkpoint_counter += 1;
-            if checkpoint_counter >= checkpoint_interval {
-                checkpoint.current_run = current_run;
-                checkpoint.current_run_start = run_start;
-                run_logger.flush()?;
-                checkpoint.touch();
-                checkpoint.save_atomic_slim(checkpoint_path)?;
-                checkpoint_counter = 0;
+            if !self.bench_mode {
+                checkpoint_counter += 1;
+                if checkpoint_counter >= checkpoint_interval {
+                    checkpoint.current_run = current_run;
+                    checkpoint.current_run_start = run_start;
+                    run_logger.flush()?;
+                    checkpoint.touch();
+                    checkpoint.save_atomic_slim(checkpoint_path)?;
+                    checkpoint_counter = 0;
+                }
             }
         }
 
-        if current_run >= 2 {
-            if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
-                run_logger.log_run(&run_info)?;
+        if !self.bench_mode {
+            if current_run >= 2 {
+                if let Some(run_info) = checkpoint.record_run(run_start, current_run) {
+                    run_logger.log_run(&run_info)?;
+                }
             }
-        }
 
-        checkpoint.current_run = current_run;
-        checkpoint.current_run_start = run_start;
-        run_logger.flush()?;
-        checkpoint.touch();
-        checkpoint.save_atomic_slim(checkpoint_path)?;
+            checkpoint.current_run = current_run;
+            checkpoint.current_run_start = run_start;
+            run_logger.flush()?;
+            checkpoint.touch();
+            checkpoint.save_atomic_slim(checkpoint_path)?;
+        }
 
         log::info!(
             "Worker {} completed: checked {}, governors {}, longest run {} at {}",
@@ -1798,6 +1812,7 @@ mod tests {
             prefilter_primes,
             0,
             0,
+            false, // bench_mode
         );
 
         let progress = GlobalProgress::new();
@@ -1974,6 +1989,7 @@ mod tests {
             prefilter_primes,
             0,
             0,
+            false, // bench_mode
         );
 
         let progress = GlobalProgress::new();
