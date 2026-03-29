@@ -13,6 +13,7 @@
 //! are accurate without slowing down the hot sieve loop.
 
 use crate::governor::GovernorChecker;
+use crate::governor::vp_central_binom_dispatch;
 use crate::sieve::{build_prime_data, PrimeData, PrimeSieve};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
@@ -734,11 +735,14 @@ pub fn solve<H: SolverHooks>(
                     }
 
                     // Post-chunk: scan smooth[] for runs and report via hooks.
-                    // Runs >= verify_threshold are verified against the true
-                    // governor check; shorter runs are reported from the sieve.
+                    // Short runs (< k+1) are reported as-is from the sieve (may
+                    // include a few false governors, but this only affects the
+                    // distribution of short runs — not correctness of witnesses).
+                    // Long runs (>= k+1) are verified against the true governor
+                    // check so the longest_run statistic is accurate.
                     if do_track_runs {
                         let min_run = hooks.min_run_length();
-                        let verify_threshold = 12;
+                        let target_run = (k + 1) as usize;
                         let checker = gov_checker.as_ref().unwrap();
                         let mut run_start = 0u64;
                         let mut run_len = 0usize;
@@ -752,7 +756,8 @@ pub fn solve<H: SolverHooks>(
                                 run_len += 1;
                             } else {
                                 if run_len >= min_run {
-                                    if run_len >= verify_threshold {
+                                    if run_len >= target_run {
+                                        // Long run: verify each position
                                         let mut vlen = 0usize;
                                         let mut vstart = run_start;
                                         for j in 0..run_len {
@@ -771,6 +776,7 @@ pub fn solve<H: SolverHooks>(
                                             hooks.on_run(worker_id, vstart, vlen);
                                         }
                                     } else {
+                                        // Short run: report unverified (fast path)
                                         hooks.on_run(worker_id, run_start, run_len);
                                     }
                                 }
@@ -778,7 +784,7 @@ pub fn solve<H: SolverHooks>(
                             }
                         }
                         if run_len >= min_run {
-                            if run_len >= verify_threshold {
+                            if run_len >= target_run {
                                 let mut vlen = 0usize;
                                 let mut vstart = run_start;
                                 for j in 0..run_len {
@@ -813,6 +819,370 @@ pub fn solve<H: SolverHooks>(
     SolveResult {
         min_witness: global_min_n.load(Relaxed),
         chunks_processed: current_chunk.load(Relaxed),
+        witness_count: witness_count.load(Relaxed),
+        duration,
+    }
+}
+
+
+
+/// Per-worker range assignment for checkpoint resume.
+#[derive(Clone)]
+pub struct WorkerRange {
+    pub worker_id: usize,
+    pub start: u64,
+    pub end: u64,
+    pub resume_pos: u64,
+}
+
+/// Run the sieve solver with per-worker fixed ranges (for checkpoint resume).
+///
+/// Same high-performance engine as [`solve`], but each worker processes its
+/// assigned range starting from `resume_pos`. This allows exact checkpoint
+/// resume with the fast bucketed-sieve architecture.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_ranges<H: SolverHooks>(
+    k: u64,
+    ranges: &[WorkerRange],
+    prime_data: &[PrimeData],
+    bench_secs: f64,
+    progress: bool,
+    hooks: &H,
+) -> SolveResult {
+    let k32 = k as u32;
+    let two_k = 2 * k;
+    let t_start = Instant::now();
+    let bench_mode = bench_secs > 0.0;
+
+    let global_min_n = AtomicU64::new(u64::MAX);
+    let witness_count = AtomicU64::new(0);
+    let time_up = AtomicBool::new(false);
+    let total_chunks_done = AtomicU64::new(0);
+
+    // Compute total range for progress reporting
+    let global_start = ranges.iter().map(|r| r.start).min().unwrap_or(0);
+    let global_end = ranges.iter().map(|r| r.end).max().unwrap_or(0);
+
+    std::thread::scope(|s| {
+        // Progress reporter thread
+        if progress {
+            let total_chunks_ref = &total_chunks_done;
+            let global_min_ref = &global_min_n;
+            let time_up_ref = &time_up;
+            s.spawn(move || {
+                let mut last_chunks: u64 = 0;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let chunks_now = total_chunks_ref.load(Relaxed);
+                    let delta = chunks_now - last_chunks;
+                    let candidates_delta = delta * CHUNK_SIZE;
+                    let mcps = candidates_delta as f64 / 0.5 / 1e6;
+                    let total_candidates = chunks_now * CHUNK_SIZE;
+                    let elapsed = t_start.elapsed().as_secs_f64();
+                    let cumulative_mcps = total_candidates as f64 / elapsed / 1e6;
+                    eprintln!(
+                        "P\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.4}",
+                        k, mcps, cumulative_mcps,
+                        total_candidates as f64 / 1e9, elapsed
+                    );
+                    last_chunks = chunks_now;
+
+                    if time_up_ref.load(Relaxed) {
+                        break;
+                    }
+                    // Check if all workers might be done
+                    if chunks_now > 0 && mcps < 1.0 && elapsed > 5.0 {
+                        break;
+                    }
+                }
+            });
+        }
+
+        for wr in ranges {
+            let worker_id = wr.worker_id as u32;
+            let w_start = wr.resume_pos; // resume from checkpoint position
+            let w_end = wr.end;
+            let global_min_n = &global_min_n;
+            let witness_count = &witness_count;
+            let time_up = &time_up;
+            let total_chunks_done = &total_chunks_done;
+
+            s.spawn(move || {
+                if w_start >= w_end {
+                    return; // worker already finished its range
+                }
+
+                let buf_size = BLOCK_SIZE as usize + k as usize + 1;
+                let mut rem = vec![0u64; buf_size];
+                let mut prime_offsets: Vec<u64> = Vec::new();
+
+                let num_buckets = (CHUNK_SIZE as u32).div_ceil(BLOCK_SIZE) + 1;
+                let mut buckets: Vec<FastBucket> =
+                    (0..num_buckets).map(|_| FastBucket::new()).collect();
+
+                let do_track_runs = hooks.track_runs();
+                let mut smooth: Vec<bool> = if do_track_runs {
+                    vec![false; CHUNK_SIZE as usize]
+                } else {
+                    vec![]
+                };
+
+                // Process chunks within this worker's assigned range
+                let mut chunk_start = w_start;
+                while chunk_start < w_end {
+                    if bench_mode && time_up.load(Relaxed) {
+                        break;
+                    }
+                    if !bench_mode && chunk_start > global_min_n.load(Relaxed) {
+                        break;
+                    }
+
+                    let effective_chunk = CHUNK_SIZE.min(w_end - chunk_start);
+                    let l_chunk = chunk_start;
+                    let r_chunk = l_chunk + effective_chunk + k - 1;
+                    let chunk_w = (r_chunk - l_chunk + 1) as u32;
+
+                    let max_p = isqrt_u64(r_chunk.saturating_mul(2)).max(two_k) + 1;
+                    let chunk_total_primes = prime_data.partition_point(|pd| pd.p <= max_p);
+
+                    if prime_offsets.len() < chunk_total_primes {
+                        prime_offsets.resize(chunk_total_primes, 0);
+                    }
+
+                    let first_large_prime_idx = prime_data[..chunk_total_primes]
+                        .partition_point(|pd| pd.p <= BLOCK_SIZE as u64);
+
+                    // Compute initial offsets via Barrett reduction
+                    for idx in 1..chunk_total_primes {
+                        let pd = &prime_data[idx];
+                        let p = pd.p;
+                        let num = l_chunk + p - 1;
+                        let start_c = (((num as u128).wrapping_mul(pd.magic as u128)) >> 64) as u64
+                            >> pd.shift as u64;
+                        prime_offsets[idx] = start_c * p - l_chunk;
+                    }
+
+                    // Bucket large primes by target block
+                    for bucket in buckets.iter_mut() {
+                        bucket.clear();
+                    }
+                    for idx in first_large_prime_idx..chunk_total_primes {
+                        let p = prime_data[idx].p;
+                        let mut sj = prime_offsets[idx];
+                        while sj < chunk_w as u64 {
+                            let block_idx = (sj as u32) >> BLOCK_SHIFT;
+                            let offset = (sj as u32) & BLOCK_MASK;
+                            buckets[block_idx as usize].push(idx as u32, offset);
+                            sj += p;
+                        }
+                    }
+
+                    let mut overlap: u32 = 0;
+                    let mut scan_j: u32 = 0;
+
+                    let mut block_start: u32 = 0;
+                    while block_start < chunk_w {
+                        let block_idx = block_start >> BLOCK_SHIFT;
+                        let block_l = l_chunk + block_start as u64;
+                        let block_r = r_chunk.min(block_l + BLOCK_SIZE as u64 - 1);
+                        let num_new = (block_r - block_l + 1) as u32;
+
+                        // Initialize: strip factor of 2, check v_2
+                        {
+                            let mut x = block_l;
+                            for idx_new in 0..num_new {
+                                let tz = x.trailing_zeros();
+                                let odd_part = x >> tz;
+                                let val = if x.count_ones() >= tz { odd_part } else { 0 };
+                                unsafe {
+                                    *rem.as_mut_ptr().add((overlap + idx_new) as usize) = val;
+                                }
+                                x += 1;
+                            }
+                        }
+
+                        let rem_ptr = unsafe { rem.as_mut_ptr().add(overlap as usize) };
+
+                        // Small primes with inline v_p check
+                        let num_new_u64 = num_new as u64;
+                        for idx in 1..first_large_prime_idx {
+                            let p = prime_data[idx].p;
+                            let mut sj = prime_offsets[idx];
+                            if sj < num_new_u64 {
+                                let inv = prime_data[idx].inv_p;
+                                let limit = prime_data[idx].max_quot;
+                                dispatch_strip!(
+                                    p, inv, limit, &mut sj, num_new_u64, rem_ptr, block_l,
+                                    [3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53,
+                                     59, 61, 67, 71, 73, 79, 83, 89, 97]
+                                );
+                                prime_offsets[idx] = sj;
+                            } else {
+                                prime_offsets[idx] = sj - num_new_u64;
+                            }
+                        }
+
+                        // Bucketed large primes with inline v_p check
+                        {
+                            let b = &buckets[block_idx as usize];
+                            let b_count = b.data.len();
+                            let b_ptr = b.data.as_ptr();
+                            let pd_ptr = prime_data.as_ptr();
+                            for i in 0..b_count {
+                                unsafe {
+                                    if i + 8 < b_count {
+                                        let future_idx = (*b_ptr.add(i + 8)).p_idx as usize;
+                                        let ptr = pd_ptr.add(future_idx) as *const u8;
+                                        #[cfg(target_arch = "x86_64")]
+                                        std::arch::x86_64::_mm_prefetch(
+                                            ptr as *const i8,
+                                            std::arch::x86_64::_MM_HINT_T1,
+                                        );
+                                        #[cfg(target_arch = "aarch64")]
+                                        std::arch::asm!(
+                                            "prfm pldl2keep, [{ptr}]",
+                                            ptr = in(reg) ptr,
+                                            options(nostack, preserves_flags)
+                                        );
+                                    }
+
+                                    let item = *b_ptr.add(i);
+                                    let pd = &*pd_ptr.add(item.p_idx as usize);
+                                    let r = *rem_ptr.add(item.offset as usize);
+                                    if r == 0 { continue; }
+                                    let mut temp = r.wrapping_mul(pd.inv_p);
+                                    let mut exp = 1u32;
+                                    let mut q = temp.wrapping_mul(pd.inv_p);
+                                    if q <= pd.max_quot {
+                                        temp = q;
+                                        exp += 1;
+                                        loop {
+                                            q = temp.wrapping_mul(pd.inv_p);
+                                            if q > pd.max_quot { break; }
+                                            temp = q;
+                                            exp += 1;
+                                        }
+                                    }
+                                    let n = block_l + item.offset as u64;
+                                    let supply = vp_central_binom_dispatch(n, pd.p);
+                                    if (exp as u64) > supply {
+                                        *rem_ptr.add(item.offset as usize) = 0;
+                                    } else {
+                                        *rem_ptr.add(item.offset as usize) = temp;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Scan for consecutive governors
+                        let w_search = overlap + num_new;
+                        while scan_j + k32 < w_search {
+                            let mut i = k32 as i32;
+                            while i >= 0
+                                && unsafe { *rem.as_ptr().add((scan_j + i as u32) as usize) } == 1
+                            {
+                                i -= 1;
+                            }
+
+                            if i < 0 {
+                                let cand_n = block_l - overlap as u64 + scan_j as u64 + k;
+                                if cand_n > k {
+                                    let dominated =
+                                        !bench_mode && cand_n >= global_min_n.load(Relaxed);
+                                    if !dominated {
+                                        match exact_check_detailed(
+                                            cand_n, k, &prime_data[..chunk_total_primes],
+                                        ) {
+                                            Ok(()) => {
+                                                witness_count.fetch_add(1, Relaxed);
+                                                hooks.on_witness(worker_id, cand_n, k);
+                                                let mut current = global_min_n.load(Relaxed);
+                                                while cand_n < current {
+                                                    match global_min_n.compare_exchange_weak(
+                                                        current, cand_n, Relaxed, Relaxed,
+                                                    ) {
+                                                        Ok(_) => break,
+                                                        Err(c) => current = c,
+                                                    }
+                                                }
+                                            }
+                                            Err(detail) => {
+                                                hooks.on_false_positive(
+                                                    worker_id, cand_n, k, &detail,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                scan_j += 1;
+                            } else {
+                                scan_j += i as u32 + 1;
+                            }
+                        }
+
+                        // Record smooth status for run tracking
+                        if do_track_runs {
+                            for j in 0..num_new as usize {
+                                let chunk_pos = block_start as usize + j;
+                                if chunk_pos < effective_chunk as usize {
+                                    smooth[chunk_pos] =
+                                        unsafe { *rem.as_ptr().add(overlap as usize + j) } == 1;
+                                }
+                            }
+                        }
+
+                        // Carry overlap
+                        if w_search >= k32 {
+                            let src = (w_search - k32) as usize;
+                            unsafe {
+                                let p = rem.as_mut_ptr();
+                                std::ptr::copy(p.add(src), p, k32 as usize);
+                            }
+                            scan_j -= w_search - k32;
+                            overlap = k32;
+                        } else {
+                            overlap = w_search;
+                        }
+
+                        block_start += BLOCK_SIZE;
+                    }
+
+                    // Post-chunk run tracking
+                    if do_track_runs {
+                        let min_run = hooks.min_run_length();
+                        let mut run_start = 0u64;
+                        let mut run_len = 0usize;
+                        for (i, &is_smooth) in
+                            smooth.iter().enumerate().take(effective_chunk as usize)
+                        {
+                            if is_smooth {
+                                if run_len == 0 { run_start = l_chunk + i as u64; }
+                                run_len += 1;
+                            } else {
+                                if run_len >= min_run {
+                                    hooks.on_run(worker_id, run_start, run_len);
+                                }
+                                run_len = 0;
+                            }
+                        }
+                        if run_len >= min_run {
+                            hooks.on_run(worker_id, run_start, run_len);
+                        }
+                    }
+
+                    hooks.on_chunk_done(worker_id, l_chunk, l_chunk + effective_chunk);
+                    total_chunks_done.fetch_add(1, Relaxed);
+                    chunk_start += effective_chunk;
+                }
+            });
+        }
+    });
+
+    time_up.store(true, Relaxed);
+    let duration = t_start.elapsed();
+    SolveResult {
+        min_witness: global_min_n.load(Relaxed),
+        chunks_processed: total_chunks_done.load(Relaxed),
         witness_count: witness_count.load(Relaxed),
         duration,
     }

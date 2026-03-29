@@ -687,16 +687,58 @@ fn main() -> anyhow::Result<()> {
         config.significant_run_threshold,
         checkpoint_interval_chunks,
     );
-    let result = erdos396::sieve_solver::solve(
+
+    // Build per-worker ranges with checkpoint resume
+    let range_size = config.end - config.start;
+    let per_worker = range_size / config.num_workers as u64;
+    let mut worker_ranges: Vec<erdos396::sieve_solver::WorkerRange> = Vec::new();
+    for w in 0..config.num_workers {
+        let w_start = config.start + w as u64 * per_worker;
+        let w_end = if w == config.num_workers - 1 {
+            config.end
+        } else {
+            config.start + (w as u64 + 1) * per_worker
+        };
+
+        // Check for per-worker checkpoint
+        let cp_path = config.output_dir.join(format!(
+            "checkpoint_k{}_w{:02}.json",
+            config.target_k, w
+        ));
+        let resume_pos = if cp_path.exists() {
+            if let Ok(data) = std::fs::read_to_string(&cp_path) {
+                if let Ok(cp) = serde_json::from_str::<serde_json::Value>(&data) {
+                    let cp_start = cp.get("start").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let cp_end = cp.get("end").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let pos = cp.get("current_pos").and_then(|v| v.as_u64()).unwrap_or(w_start);
+                    if cp_start == w_start && cp_end == w_end {
+                        eprintln!("# w{:02}: resuming from {:.6}T (checkpoint)", w, pos as f64 / 1e12);
+                        pos
+                    } else {
+                        eprintln!("# w{:02}: checkpoint range mismatch, starting fresh", w);
+                        w_start
+                    }
+                } else { w_start }
+            } else { w_start }
+        } else {
+            w_start
+        };
+
+        worker_ranges.push(erdos396::sieve_solver::WorkerRange {
+            worker_id: w,
+            start: w_start,
+            end: w_end,
+            resume_pos,
+        });
+    }
+
+    let result = erdos396::sieve_solver::solve_ranges(
         config.target_k as u64,
-        config.start,
-        config.end,
+        &worker_ranges,
         &prime_data,
-        config.num_workers as u32,
         0.0,
         true, // progress
         &hooks,
-        resume_chunks,
     );
 
     let sec = result.duration.as_secs_f64();
