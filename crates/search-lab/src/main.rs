@@ -15,15 +15,17 @@ const BLOCK_SHIFT: u32 = 15;
 const BLOCK_MASK: u32 = 0x7FFF;
 
 // ---------------------------------------------------------------------------
-// PrimeData — precomputed per-prime data for fast modular arithmetic
+// PrimeData — precomputed per-prime data for fast modular arithmetic.
+// Hot fields (inv_p, max_quot) first so they share a cache line in the strip loop.
 // ---------------------------------------------------------------------------
 #[derive(Clone, Copy)]
+#[repr(C)]
 struct PrimeData {
-    p: u32,
-    shift: u8,     // bit_width(p) - 1 — for Barrett reduction
-    inv_p: u64,    // modular inverse of p mod 2^64
-    max_quot: u64, // u64::MAX / p — used for divisibility test
-    magic: u64,    // Barrett magic constant for fast division: ceil(2^(64+shift) / p)
+    inv_p: u64,    // modular inverse of p mod 2^64 — used every strip iteration
+    max_quot: u64, // u64::MAX / p — divisibility threshold, used every strip iteration
+    magic: u64,    // Barrett magic constant — used once per prime per chunk
+    p: u32,        // prime value — used for stepping
+    shift: u8,     // bit_width(p) - 1 — used once per prime per chunk (Barrett)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,11 +130,11 @@ fn build_prime_data(primes: &[Prime]) -> Vec<PrimeData> {
                 0
             };
             PrimeData {
-                p,
-                shift,
                 inv_p,
                 max_quot: u64::MAX / p64,
                 magic,
+                p,
+                shift,
             }
         })
         .collect()
