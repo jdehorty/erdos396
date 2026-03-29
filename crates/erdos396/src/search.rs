@@ -188,8 +188,12 @@ pub struct SearchResult {
     /// All significant runs found
     pub significant_runs: Vec<crate::checkpoint::RunInfo>,
 
-    /// Search duration
+    /// Search duration (includes sieve building)
     pub duration: Duration,
+
+    /// Search-only duration (excludes sieve building).
+    /// Used for R-line output where prime-table generation is excluded.
+    pub search_duration: Duration,
 
     /// Processing rate (numbers/second)
     pub rate: f64,
@@ -886,7 +890,11 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
         )));
     }
 
-    std::fs::create_dir_all(&config.output_dir)?;
+    let bench_mode = config.bench_secs > 0.0;
+
+    if !bench_mode {
+        std::fs::create_dir_all(&config.output_dir)?;
+    }
 
     // Build prime sieve for factorization (needed for --no-prefilter and verification)
     log::info!("Building prime sieve for range up to {}...", config.end);
@@ -907,6 +915,8 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
         prefilter_primes.len(),
         prefilter_limit
     );
+
+    let search_start_time = Instant::now();
 
     // Calculate per-worker ranges
     let range_size = config.end - config.start;
@@ -939,19 +949,46 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
 
     let progress = Arc::new(GlobalProgress::new());
 
+    // In bench mode, spawn a safety timer that sets should_stop after bench_secs.
+    // The --end bound normally terminates workers first.
+    if bench_mode {
+        let p = Arc::clone(&progress);
+        let secs = config.bench_secs;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs_f64(secs));
+            p.should_stop.store(true, Ordering::Relaxed);
+        });
+    }
+
     let results: Vec<Result<Checkpoint>> = ranges
         .into_par_iter()
         .map(|(worker_id, w_start, w_end)| -> Result<Checkpoint> {
-            let checkpoint_path = config.output_dir.join(format!(
-                "checkpoint_k{}_w{:02}.json",
-                config.target_k, worker_id
-            ));
+            // In bench mode: use a per-worker tempdir for RunLogger and checkpoints.
+            // No checkpoint loading, no run log migration. The tempdir is cleaned
+            // up automatically when _bench_tmpdir is dropped.
+            let _bench_tmpdir;
+            let (checkpoint_path, run_log_path) = if bench_mode {
+                let td = tempfile::tempdir()
+                    .map_err(crate::Error::Io)?;
+                let cp = td.path().join("checkpoint.json");
+                let rl = td.path().join("runs.jsonl");
+                _bench_tmpdir = Some(td);
+                (cp, rl)
+            } else {
+                _bench_tmpdir = None;
+                (
+                    config.output_dir.join(format!(
+                        "checkpoint_k{}_w{:02}.json",
+                        config.target_k, worker_id
+                    )),
+                    config.output_dir.join(format!(
+                        "runs_k{}_w{:02}.jsonl",
+                        config.target_k, worker_id
+                    )),
+                )
+            };
 
-            let run_log_path = config
-                .output_dir
-                .join(format!("runs_k{}_w{:02}.jsonl", config.target_k, worker_id));
-
-            let mut checkpoint = if checkpoint_path.exists() {
+            let mut checkpoint = if !bench_mode && checkpoint_path.exists() {
                 match Checkpoint::load(&checkpoint_path) {
                     Ok(mut cp) => {
                         let mut ok = true;
@@ -1121,6 +1158,7 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
                 prefilter_primes.clone(),
                 config.fused_self_check_samples,
                 config.fused_audit_interval,
+                bench_mode,
             );
 
             worker.search_range(
@@ -1138,6 +1176,7 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
     let results: Vec<Checkpoint> = results.into_iter().collect::<Result<Vec<_>>>()?;
 
     let duration = start_time.elapsed();
+    let search_duration = search_start_time.elapsed();
 
     // Aggregate results
     let mut total_checked = 0u64;
@@ -1370,6 +1409,7 @@ pub fn parallel_search(config: &SearchConfig) -> Result<SearchResult> {
         safety_net_windows_checked,
         safety_net_alerts,
         duration,
+        search_duration,
         rate,
         prefilter_rejected: progress.total_rejected_odd_prime.load(Ordering::Relaxed)
             + progress.total_rejected_large_pf.load(Ordering::Relaxed)

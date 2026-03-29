@@ -79,5 +79,5 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
 anyhow = "1.0"
 
-[dev-dependencies]
+# Temp dirs (used by bench mode to avoid polluting real output dir)
 tempfile = "3.10"
