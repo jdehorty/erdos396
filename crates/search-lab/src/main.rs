@@ -7,7 +7,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
 
-type Prime = u32;
+type Prime = u64;
 
 const CHUNK_SIZE: u64 = 1_048_576; // 1M — matches C++ reference
 const BLOCK_SIZE: u32 = 32768;
@@ -24,7 +24,7 @@ struct PrimeData {
     inv_p: u64,    // modular inverse of p mod 2^64 — used every strip iteration
     max_quot: u64, // u64::MAX / p — divisibility threshold, used every strip iteration
     magic: u64,    // Barrett magic constant — used once per prime per chunk
-    p: u32,        // prime value — used for stepping
+    p: u64,        // prime value — full u64 to support sieve limits above 2^32
     shift: u8,     // bit_width(p) - 1 — used once per prime per chunk (Barrett)
 }
 
@@ -83,7 +83,7 @@ fn mod_inverse_u64(n: u64) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Sieve of Eratosthenes (u32 primes — halves cache footprint)
+// Sieve of Eratosthenes
 // ---------------------------------------------------------------------------
 fn sieve_primes(limit: usize) -> Vec<Prime> {
     let mut is_prime = vec![true; limit + 1];
@@ -115,19 +115,16 @@ fn build_prime_data(primes: &[Prime]) -> Vec<PrimeData> {
     primes
         .iter()
         .map(|&p| {
-            let p64 = p as u64;
-            let inv_p = if p % 2 != 0 { mod_inverse_u64(p64) } else { 0 };
-            // Barrett reduction: magic = ceil(2^(64+shift) / p)
-            // shift = bit_width(p) - 1
-            let shift = (32 - p.leading_zeros()).saturating_sub(1) as u8;
+            let inv_p = if p % 2 != 0 { mod_inverse_u64(p) } else { 0 };
+            let shift = (64 - p.leading_zeros()).saturating_sub(1) as u8;
             let magic = if p > 1 {
-                (((1u128 << (64 + shift as u32)) / p64 as u128) + 1) as u64
+                (((1u128 << (64 + shift as u32)) / p as u128) + 1) as u64
             } else {
                 0
             };
             PrimeData {
                 inv_p,
-                max_quot: u64::MAX / p64,
+                max_quot: u64::MAX / p,
                 magic,
                 p,
                 shift,
@@ -161,7 +158,7 @@ fn isqrt_u64(n: u64) -> u64 {
 // stepping by P, and updates start_j for next block.
 // ---------------------------------------------------------------------------
 #[inline(always)]
-fn process_prime<const P: u32>(start_j: &mut u32, w_block: u32, rem: *mut u64) {
+fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64) {
     const fn inv_p_const(p: u64) -> u64 {
         let mut inv = p.wrapping_mul(3) ^ 2;
         inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
@@ -175,17 +172,14 @@ fn process_prime<const P: u32>(start_j: &mut u32, w_block: u32, rem: *mut u64) {
         u64::MAX / p
     }
 
-    // These are computed at compile time for each monomorphization
-    let inv = inv_p_const(P as u64);
-    let limit = limit_const(P as u64);
+    let inv = inv_p_const(P);
+    let limit = limit_const(P);
 
     let mut j = *start_j;
     while j < w_block {
         unsafe {
             let r = *rem.add(j as usize);
-            // First division (always — we know p | (n-i) at this offset)
             let mut temp = r.wrapping_mul(inv);
-            // Strip additional factors (rare)
             let mut q = temp.wrapping_mul(inv);
             if q <= limit {
                 temp = q;
@@ -213,11 +207,10 @@ fn process_prime_dyn(
     p: u64,
     inv_p: u64,
     max_quot: u64,
-    start_j: &mut u32,
-    w_block: u32,
+    start_j: &mut u64,
+    w_block: u64,
     rem: *mut u64,
 ) {
-    let p32 = p as u32;
     let mut j = *start_j;
     while j < w_block {
         unsafe {
@@ -236,7 +229,7 @@ fn process_prime_dyn(
             }
             *rem.add(j as usize) = temp;
         }
-        j += p32;
+        j += p;
     }
     *start_j = j - w_block;
 }
@@ -248,7 +241,7 @@ macro_rules! dispatch_strip {
     ($p:expr, $inv:expr, $limit:expr, $sj:expr, $w:expr, $rm:expr, [$($prime:literal),* $(,)?]) => {
         match $p {
             $($prime => process_prime::<$prime>($sj, $w, $rm),)*
-            _ => process_prime_dyn($p as u64, $inv, $limit, $sj, $w, $rm),
+            _ => process_prime_dyn($p, $inv, $limit, $sj, $w, $rm),
         }
     };
 }
@@ -279,7 +272,7 @@ fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
     // Part 2: Legendre formula for primes p in (2, 2k]
     let nk1 = n - k - 1;
     for pd in prime_data {
-        let p = pd.p as u64;
+        let p = pd.p;
         if p == 2 {
             continue;
         }
@@ -302,16 +295,13 @@ fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
     }
 
     // Part 3: Per-element large prime check
-    // For each element n-i (i=0..k), strip small primes then check
-    // any remaining large prime factor against Legendre bound.
     for i in 0..=k {
         let ni = n - i;
         let mut temp = ni;
-        // Strip factor of 2
         temp >>= temp.trailing_zeros();
 
         for pd in prime_data {
-            let p = pd.p as u64;
+            let p = pd.p;
             if p == 2 {
                 continue;
             }
@@ -476,7 +466,7 @@ fn solve(
                 // rem buffer: BLOCK_SIZE + k + 1 for overlap (fix #4)
                 let buf_size = BLOCK_SIZE as usize + k as usize + 1;
                 let mut rem = vec![0u64; buf_size];
-                let mut prime_offsets: Vec<u32> = Vec::new();
+                let mut prime_offsets: Vec<u64> = Vec::new();
 
                 // 33 buckets: ceil(CHUNK_SIZE / BLOCK_SIZE) + 1
                 let num_buckets = (CHUNK_SIZE as u32).div_ceil(BLOCK_SIZE) + 1;
@@ -507,26 +497,23 @@ fn solve(
                     let chunk_w = (r_chunk - l_chunk + 1) as u32;
 
                     let max_p = isqrt_u64(r_chunk.saturating_mul(2)).max(two_k) + 1;
-                    let chunk_total_primes =
-                        prime_data.partition_point(|pd| (pd.p as u64) <= max_p);
+                    let chunk_total_primes = prime_data.partition_point(|pd| pd.p <= max_p);
 
                     if prime_offsets.len() < chunk_total_primes {
                         prime_offsets.resize(chunk_total_primes, 0);
                     }
 
-                    // Find first large prime (p > BLOCK_SIZE)
-                    let first_large_prime_idx =
-                        prime_data[..chunk_total_primes].partition_point(|pd| pd.p <= BLOCK_SIZE);
+                    let first_large_prime_idx = prime_data[..chunk_total_primes]
+                        .partition_point(|pd| pd.p <= BLOCK_SIZE as u64);
 
                     // Compute initial offsets via Barrett reduction (no hardware div)
                     for idx in 1..chunk_total_primes {
                         let pd = &prime_data[idx];
-                        let p = pd.p as u64;
+                        let p = pd.p;
                         let num = l_chunk + p - 1;
-                        // Barrett: start_c = ceil(num / p) = floor((num * magic) >> (64 + shift))
                         let start_c = (((num as u128).wrapping_mul(pd.magic as u128)) >> 64) as u64
                             >> pd.shift as u64;
-                        prime_offsets[idx] = (start_c * p - l_chunk) as u32;
+                        prime_offsets[idx] = start_c * p - l_chunk;
                     }
 
                     // Bucket large primes by target block
@@ -536,9 +523,9 @@ fn solve(
                     for idx in first_large_prime_idx..chunk_total_primes {
                         let p = prime_data[idx].p;
                         let mut sj = prime_offsets[idx];
-                        while sj < chunk_w {
-                            let block_idx = sj >> BLOCK_SHIFT;
-                            let offset = sj & BLOCK_MASK;
+                        while sj < chunk_w as u64 {
+                            let block_idx = (sj as u32) >> BLOCK_SHIFT;
+                            let offset = (sj as u32) & BLOCK_MASK;
                             buckets[block_idx as usize].push(idx as u32, offset);
                             sj += p;
                         }
@@ -570,11 +557,12 @@ fn solve(
                         let rem_ptr = unsafe { rem.as_mut_ptr().add(overlap as usize) };
 
                         // Process small primes (p <= BLOCK_SIZE, skip p=2)
+                        let num_new_u64 = num_new as u64;
                         for idx in 1..first_large_prime_idx {
                             let p = prime_data[idx].p;
                             let mut sj = prime_offsets[idx];
 
-                            if sj < num_new {
+                            if sj < num_new_u64 {
                                 let inv = prime_data[idx].inv_p;
                                 let limit = prime_data[idx].max_quot;
 
@@ -583,7 +571,7 @@ fn solve(
                                     inv,
                                     limit,
                                     &mut sj,
-                                    num_new,
+                                    num_new_u64,
                                     rem_ptr,
                                     [
                                         3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53,
@@ -592,7 +580,7 @@ fn solve(
                                 );
                                 prime_offsets[idx] = sj;
                             } else {
-                                prime_offsets[idx] = sj - num_new;
+                                prime_offsets[idx] = sj - num_new_u64;
                             }
                         }
 

@@ -73,7 +73,7 @@ fn isqrt_u64(n: u64) -> u64 {
 // Const-generic strip with offset tracking (matches search-lab)
 // ---------------------------------------------------------------------------
 #[inline(always)]
-fn process_prime<const P: u32>(start_j: &mut u32, w_block: u32, rem: *mut u64) {
+fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64) {
     const fn inv_p_const(p: u64) -> u64 {
         let mut inv = p.wrapping_mul(3) ^ 2;
         inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
@@ -87,8 +87,8 @@ fn process_prime<const P: u32>(start_j: &mut u32, w_block: u32, rem: *mut u64) {
         u64::MAX / p
     }
 
-    let inv = inv_p_const(P as u64);
-    let limit = limit_const(P as u64);
+    let inv = inv_p_const(P);
+    let limit = limit_const(P);
 
     let mut j = *start_j;
     while j < w_block {
@@ -121,11 +121,10 @@ fn process_prime_dyn(
     p: u64,
     inv_p: u64,
     max_quot: u64,
-    start_j: &mut u32,
-    w_block: u32,
+    start_j: &mut u64,
+    w_block: u64,
     rem: *mut u64,
 ) {
-    let p32 = p as u32;
     let mut j = *start_j;
     while j < w_block {
         unsafe {
@@ -144,7 +143,7 @@ fn process_prime_dyn(
             }
             *rem.add(j as usize) = temp;
         }
-        j += p32;
+        j += p;
     }
     *start_j = j - w_block;
 }
@@ -156,7 +155,7 @@ macro_rules! dispatch_strip {
     ($p:expr, $inv:expr, $limit:expr, $sj:expr, $w:expr, $rm:expr, [$($prime:literal),* $(,)?]) => {
         match $p {
             $($prime => process_prime::<$prime>($sj, $w, $rm),)*
-            _ => process_prime_dyn($p as u64, $inv, $limit, $sj, $w, $rm),
+            _ => process_prime_dyn($p, $inv, $limit, $sj, $w, $rm),
         }
     };
 }
@@ -205,7 +204,7 @@ fn exact_check_detailed(
     // Part 2: Legendre formula for primes p in (2, 2k]
     let nk1 = n - k - 1;
     for pd in prime_data {
-        let p = pd.p as u64;
+        let p = pd.p;
         if p == 2 {
             continue;
         }
@@ -239,7 +238,7 @@ fn exact_check_detailed(
         temp >>= temp.trailing_zeros();
 
         for pd in prime_data {
-            let p = pd.p as u64;
+            let p = pd.p;
             if p == 2 {
                 continue;
             }
@@ -469,7 +468,7 @@ pub fn solve<H: SolverHooks>(
                 let worker_id = thread_idx;
                 let buf_size = BLOCK_SIZE as usize + k as usize + 1;
                 let mut rem = vec![0u64; buf_size];
-                let mut prime_offsets: Vec<u32> = Vec::new();
+                let mut prime_offsets: Vec<u64> = Vec::new();
 
                 let num_buckets = (CHUNK_SIZE as u32).div_ceil(BLOCK_SIZE) + 1;
                 let mut buckets: Vec<FastBucket> =
@@ -506,24 +505,23 @@ pub fn solve<H: SolverHooks>(
                     let chunk_w = (r_chunk - l_chunk + 1) as u32;
 
                     let max_p = isqrt_u64(r_chunk.saturating_mul(2)).max(two_k) + 1;
-                    let chunk_total_primes =
-                        prime_data.partition_point(|pd| (pd.p as u64) <= max_p);
+                    let chunk_total_primes = prime_data.partition_point(|pd| pd.p <= max_p);
 
                     if prime_offsets.len() < chunk_total_primes {
                         prime_offsets.resize(chunk_total_primes, 0);
                     }
 
-                    let first_large_prime_idx =
-                        prime_data[..chunk_total_primes].partition_point(|pd| pd.p <= BLOCK_SIZE);
+                    let first_large_prime_idx = prime_data[..chunk_total_primes]
+                        .partition_point(|pd| pd.p <= BLOCK_SIZE as u64);
 
                     // Compute initial offsets via Barrett reduction
                     for idx in 1..chunk_total_primes {
                         let pd = &prime_data[idx];
-                        let p = pd.p as u64;
+                        let p = pd.p;
                         let num = l_chunk + p - 1;
                         let start_c = (((num as u128).wrapping_mul(pd.magic as u128)) >> 64) as u64
                             >> pd.shift as u64;
-                        prime_offsets[idx] = (start_c * p - l_chunk) as u32;
+                        prime_offsets[idx] = start_c * p - l_chunk;
                     }
 
                     // Bucket large primes by target block
@@ -533,9 +531,9 @@ pub fn solve<H: SolverHooks>(
                     for idx in first_large_prime_idx..chunk_total_primes {
                         let p = prime_data[idx].p;
                         let mut sj = prime_offsets[idx];
-                        while sj < chunk_w {
-                            let block_idx = sj >> BLOCK_SHIFT;
-                            let offset = sj & BLOCK_MASK;
+                        while sj < chunk_w as u64 {
+                            let block_idx = (sj as u32) >> BLOCK_SHIFT;
+                            let offset = (sj as u32) & BLOCK_MASK;
                             buckets[block_idx as usize].push(idx as u32, offset);
                             sj += p;
                         }
@@ -566,11 +564,12 @@ pub fn solve<H: SolverHooks>(
                         let rem_ptr = unsafe { rem.as_mut_ptr().add(overlap as usize) };
 
                         // Process small primes (skip p=2)
+                        let num_new_u64 = num_new as u64;
                         for idx in 1..first_large_prime_idx {
                             let p = prime_data[idx].p;
                             let mut sj = prime_offsets[idx];
 
-                            if sj < num_new {
+                            if sj < num_new_u64 {
                                 let inv = prime_data[idx].inv_p;
                                 let limit = prime_data[idx].max_quot;
 
@@ -579,7 +578,7 @@ pub fn solve<H: SolverHooks>(
                                     inv,
                                     limit,
                                     &mut sj,
-                                    num_new,
+                                    num_new_u64,
                                     rem_ptr,
                                     [
                                         3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53,
@@ -588,7 +587,7 @@ pub fn solve<H: SolverHooks>(
                                 );
                                 prime_offsets[idx] = sj;
                             } else {
-                                prime_offsets[idx] = sj - num_new;
+                                prime_offsets[idx] = sj - num_new_u64;
                             }
                         }
 

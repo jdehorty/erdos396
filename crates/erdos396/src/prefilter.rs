@@ -170,7 +170,7 @@ impl FusedBatchResult {
         let max_n: u128 = (lo as u128) + (len as u128) - 1;
         let sieve_limit = (isqrt_u128(2u128 * max_n) as u64).saturating_add(1);
 
-        let total_primes = prime_data.partition_point(|pd| (pd.p as u64) <= sieve_limit);
+        let total_primes = prime_data.partition_point(|pd| pd.p <= sieve_limit);
         let first_odd = if total_primes > 0 && prime_data[0].p == 2 {
             1
         } else {
@@ -249,11 +249,12 @@ impl FusedBatchResult {
             let block_len = (block_end - block_start) as u32;
 
             // Small primes: strip with skip-if-rejected optimization
+            let block_len_u64 = block_len as u64;
             for pidx in first_odd..first_large {
                 let pd = &prime_data[pidx];
                 let mut sj = prime_offsets[pidx];
-                if sj < block_len {
-                    while sj < block_len {
+                if sj < block_len_u64 {
+                    while sj < block_len_u64 {
                         let abs_idx = block_start + sj as usize;
                         if !rejected[abs_idx] {
                             dispatch_strip!(
@@ -267,9 +268,9 @@ impl FusedBatchResult {
                         }
                         sj += pd.p;
                     }
-                    prime_offsets[pidx] = sj - block_len;
+                    prime_offsets[pidx] = sj - block_len_u64;
                 } else {
-                    prime_offsets[pidx] = sj - block_len;
+                    prime_offsets[pidx] = sj - block_len_u64;
                 }
             }
 
