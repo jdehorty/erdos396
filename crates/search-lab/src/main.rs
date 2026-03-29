@@ -554,52 +554,45 @@ fn solve(
                         {
                             let b = &buckets[block_idx as usize];
                             let b_count = b.data.len();
+                            let b_ptr = b.data.as_ptr();
+                            let pd_ptr = prime_data.as_ptr();
                             for i in 0..b_count {
-                                // Prefetch hint for upcoming prime data
-                                if i + 8 < b_count {
-                                    let future_idx =
-                                        b.data[i + 8].p_idx as usize;
-                                    unsafe {
-                                        let ptr = prime_data
-                                            .as_ptr()
-                                            .add(future_idx)
-                                            as *const u8;
-                                        #[cfg(target_arch = "x86_64")]
-                                        {
-                                            std::arch::x86_64::_mm_prefetch(
-                                                ptr as *const i8,
-                                                std::arch::x86_64::_MM_HINT_T1,
-                                            );
-                                        }
-                                        // On other architectures the prefetch is
-                                        // a pure hint; skipping it is fine.
-                                        #[cfg(not(target_arch = "x86_64"))]
-                                        {
-                                            let _ = ptr;
-                                        }
-                                    }
-                                }
-
-                                let p_idx = b.data[i].p_idx as usize;
-                                let offset = b.data[i].offset;
-                                let inv_p = prime_data[p_idx].inv_p;
-                                let limit = prime_data[p_idx].max_quot;
-
                                 unsafe {
-                                    let r = *rem_ptr.add(offset as usize);
-                                    let mut temp = r.wrapping_mul(inv_p);
-                                    let mut q = temp.wrapping_mul(inv_p);
-                                    if q <= limit {
+                                    // Prefetch upcoming prime data (8 items ahead)
+                                    if i + 8 < b_count {
+                                        let future_idx =
+                                            (*b_ptr.add(i + 8)).p_idx as usize;
+                                        let ptr = pd_ptr.add(future_idx)
+                                            as *const u8;
+                                        #[cfg(target_arch = "aarch64")]
+                                        std::arch::asm!(
+                                            "prfm pldl2keep, [{ptr}]",
+                                            ptr = in(reg) ptr,
+                                            options(nostack, preserves_flags)
+                                        );
+                                        #[cfg(target_arch = "x86_64")]
+                                        std::arch::x86_64::_mm_prefetch(
+                                            ptr as *const i8,
+                                            std::arch::x86_64::_MM_HINT_T1,
+                                        );
+                                    }
+
+                                    let item = *b_ptr.add(i);
+                                    let pd = &*pd_ptr.add(item.p_idx as usize);
+                                    let r = *rem_ptr.add(item.offset as usize);
+                                    let mut temp = r.wrapping_mul(pd.inv_p);
+                                    let mut q = temp.wrapping_mul(pd.inv_p);
+                                    if q <= pd.max_quot {
                                         temp = q;
                                         loop {
-                                            q = temp.wrapping_mul(inv_p);
-                                            if q > limit {
+                                            q = temp.wrapping_mul(pd.inv_p);
+                                            if q > pd.max_quot {
                                                 break;
                                             }
                                             temp = q;
                                         }
                                     }
-                                    *rem_ptr.add(offset as usize) = temp;
+                                    *rem_ptr.add(item.offset as usize) = temp;
                                 }
                             }
                         }
@@ -659,9 +652,10 @@ fn solve(
 
                         // Carry overlap for cross-boundary detection
                         if w_search >= k32 {
-                            for i in 0..k32 {
-                                rem[i as usize] =
-                                    rem[(w_search - k32 + i) as usize];
+                            let src = (w_search - k32) as usize;
+                            unsafe {
+                                let p = rem.as_mut_ptr();
+                                std::ptr::copy(p.add(src), p, k32 as usize);
                             }
                             scan_j -= w_search - k32;
                             overlap = k32;
