@@ -391,11 +391,42 @@ fn main() -> anyhow::Result<()> {
     let bench_mode = config.bench_secs > 0.0;
 
     if bench_mode {
-        // Bench mode: header info to stderr
+        // Bench mode: use high-performance sieve solver (search-lab architecture)
         eprintln!(
-            "# erdos396 bench  k={}  range=[{}, {})  workers={}",
+            "# erdos396 bench (sieve_solver)  k={}  range=[{}, {})  workers={}",
             config.target_k, config.start, config.end, config.num_workers
         );
+
+        let t0 = std::time::Instant::now();
+        let prime_limit = {
+            let max_n = config.end + config.target_k as u64;
+            ((2.0 * max_n as f64).sqrt() as u64).max(2 * config.target_k as u64) + 1000
+        };
+        let prime_data = erdos396::sieve_solver::build_solver_primes(prime_limit);
+        eprintln!(
+            "# primes: {} in {:.3}s",
+            prime_data.len(),
+            t0.elapsed().as_secs_f64()
+        );
+
+        let result = erdos396::sieve_solver::solve(
+            config.target_k as u64,
+            config.start,
+            config.end,
+            &prime_data,
+            config.num_workers as u32,
+            config.bench_secs,
+            false, // progress
+        );
+
+        let sec = result.duration.as_secs_f64();
+        let checked = result.chunks_processed * 1_048_576;
+        let speed = checked as f64 / sec / 1e6;
+        println!(
+            "R\t{}\tbench\t{:.4}\t{}\t{:.2}\t{}",
+            config.target_k, sec, checked, speed, result.witness_count
+        );
+        std::process::exit(0);
     }
 
     if !bench_mode {
@@ -457,22 +488,8 @@ fn main() -> anyhow::Result<()> {
         println!();
     } // end if !bench_mode
 
-    // Run search
+    // Run search (normal mode — bench mode already handled above)
     let result = parallel_search(&config)?;
-
-    if bench_mode {
-        // Universal Benchmark Contract: R-line to stdout.
-        // Use total_checked (not config range size) to handle early timer expiry correctly.
-        let checked = result.total_checked;
-        let sec = result.search_duration.as_secs_f64();
-        let speed = checked as f64 / sec / 1e6;
-        let witness_count = result.witnesses.len();
-        println!(
-            "R\t{}\tbench\t{:.4}\t{}\t{:.2}\t{}",
-            config.target_k, sec, checked, speed, witness_count
-        );
-        std::process::exit(0);
-    }
 
     // Normal mode: print results and write report
     print_results(&result, &config);

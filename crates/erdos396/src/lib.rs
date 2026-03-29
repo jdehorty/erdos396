@@ -25,6 +25,7 @@ pub mod prefilter;
 pub mod run_collection;
 pub mod search;
 pub mod sieve;
+pub mod sieve_solver;
 pub mod verify;
 
 // Re-export main types for convenience
