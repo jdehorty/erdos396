@@ -404,7 +404,7 @@ fn solve(
     end_l: u64,
     prime_data: &[PrimeData],
     n_threads: u32,
-    _run_log_threshold: u64,
+    _run_log_threshold: u64, // TODO: wire up run-length logging
 ) -> u64 {
     let k32 = k as u32;
     let two_k = 2 * k;
