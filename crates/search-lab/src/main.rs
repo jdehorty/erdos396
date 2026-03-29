@@ -101,8 +101,8 @@ fn sieve_primes(limit: usize) -> Vec<Prime> {
         p += 1;
     }
     let mut primes = Vec::with_capacity(limit / 10);
-    for p in 2..=limit {
-        if is_prime[p] {
+    for (p, &is_p) in is_prime.iter().enumerate().take(limit + 1).skip(2) {
+        if is_p {
             primes.push(p as Prime);
         }
     }
@@ -116,11 +116,7 @@ fn build_prime_data(primes: &[Prime]) -> Vec<PrimeData> {
         .iter()
         .map(|&p| {
             let p64 = p as u64;
-            let inv_p = if p % 2 != 0 {
-                mod_inverse_u64(p64)
-            } else {
-                0
-            };
+            let inv_p = if p % 2 != 0 { mod_inverse_u64(p64) } else { 0 };
             // Barrett reduction: magic = ceil(2^(64+shift) / p)
             // shift = bit_width(p) - 1
             let shift = (32 - p.leading_zeros()).saturating_sub(1) as u8;
@@ -413,6 +409,7 @@ fn write_checkpoint(k: u64, l_batch: u64) {
 // ---------------------------------------------------------------------------
 // Solver — bucketed sieve architecture matching C++ reference
 // ---------------------------------------------------------------------------
+#[allow(clippy::too_many_arguments)] // mirrors worker/bench CLI wiring
 fn solve(
     k: u64,
     start_l: u64,
@@ -454,7 +451,11 @@ fn solve(
                     let cumulative_mcps = total_candidates as f64 / elapsed / 1e6;
                     eprintln!(
                         "P\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.4}",
-                        k, mcps, cumulative_mcps, total_candidates as f64 / 1e9, elapsed
+                        k,
+                        mcps,
+                        cumulative_mcps,
+                        total_candidates as f64 / 1e9,
+                        elapsed
                     );
                     last_chunks = chunks_now;
 
@@ -478,13 +479,12 @@ fn solve(
                 let mut prime_offsets: Vec<u32> = Vec::new();
 
                 // 33 buckets: ceil(CHUNK_SIZE / BLOCK_SIZE) + 1
-                let num_buckets = (CHUNK_SIZE as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE + 1;
+                let num_buckets = (CHUNK_SIZE as u32).div_ceil(BLOCK_SIZE) + 1;
                 let mut buckets: Vec<FastBucket> =
                     (0..num_buckets).map(|_| FastBucket::new()).collect();
 
                 loop {
-                    let chunk_id =
-                        current_chunk.fetch_add(1, Relaxed);
+                    let chunk_id = current_chunk.fetch_add(1, Relaxed);
                     let l_chunk = start_l + chunk_id * CHUNK_SIZE;
 
                     if l_chunk >= end_l {
@@ -492,9 +492,7 @@ fn solve(
                     }
                     if bench_mode {
                         // In bench mode: check time every 100 chunks, ignore witnesses
-                        if chunk_id % 100 == 0
-                            && t_start.elapsed().as_secs_f64() >= bench_secs
-                        {
+                        if chunk_id % 100 == 0 && t_start.elapsed().as_secs_f64() >= bench_secs {
                             time_up.store(true, Relaxed);
                         }
                         if time_up.load(Relaxed) {
@@ -507,18 +505,17 @@ fn solve(
                     let r_chunk = l_chunk + CHUNK_SIZE + k - 1;
                     let chunk_w = (r_chunk - l_chunk + 1) as u32;
 
-                    let max_p =
-                        isqrt_u64(r_chunk.saturating_mul(2)).max(two_k) + 1;
-                    let chunk_total_primes = prime_data
-                        .partition_point(|pd| (pd.p as u64) <= max_p);
+                    let max_p = isqrt_u64(r_chunk.saturating_mul(2)).max(two_k) + 1;
+                    let chunk_total_primes =
+                        prime_data.partition_point(|pd| (pd.p as u64) <= max_p);
 
                     if prime_offsets.len() < chunk_total_primes {
                         prime_offsets.resize(chunk_total_primes, 0);
                     }
 
                     // Find first large prime (p > BLOCK_SIZE)
-                    let first_large_prime_idx = prime_data[..chunk_total_primes]
-                        .partition_point(|pd| pd.p <= BLOCK_SIZE);
+                    let first_large_prime_idx =
+                        prime_data[..chunk_total_primes].partition_point(|pd| pd.p <= BLOCK_SIZE);
 
                     // Compute initial offsets via Barrett reduction (no hardware div)
                     for idx in 1..chunk_total_primes {
@@ -553,8 +550,7 @@ fn solve(
                     while block_start < chunk_w {
                         let block_idx = block_start >> BLOCK_SHIFT;
                         let block_l = l_chunk + block_start as u64;
-                        let block_r =
-                            r_chunk.min(block_l + BLOCK_SIZE as u64 - 1);
+                        let block_r = r_chunk.min(block_l + BLOCK_SIZE as u64 - 1);
                         let num_new = (block_r - block_l + 1) as u32;
 
                         // Initialize new elements: strip factor of 2
@@ -562,8 +558,7 @@ fn solve(
                             let mut x = block_l;
                             for idx_new in 0..num_new {
                                 unsafe {
-                                    *rem.as_mut_ptr()
-                                        .add((overlap + idx_new) as usize) =
+                                    *rem.as_mut_ptr().add((overlap + idx_new) as usize) =
                                         x >> x.trailing_zeros();
                                 }
                                 x += 1;
@@ -571,8 +566,7 @@ fn solve(
                         }
 
                         // rem_ptr points past overlap region
-                        let rem_ptr =
-                            unsafe { rem.as_mut_ptr().add(overlap as usize) };
+                        let rem_ptr = unsafe { rem.as_mut_ptr().add(overlap as usize) };
 
                         // Process small primes (p <= BLOCK_SIZE, skip p=2)
                         for idx in 1..first_large_prime_idx {
@@ -591,9 +585,8 @@ fn solve(
                                     num_new,
                                     rem_ptr,
                                     [
-                                        3, 5, 7, 11, 13, 17, 19, 23, 29, 31,
-                                        37, 41, 43, 47, 53, 59, 61, 67, 71,
-                                        73, 79, 83, 89, 97
+                                        3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53,
+                                        59, 61, 67, 71, 73, 79, 83, 89, 97
                                     ]
                                 );
                                 prime_offsets[idx] = sj;
@@ -612,10 +605,8 @@ fn solve(
                                 unsafe {
                                     // Prefetch upcoming prime data (8 items ahead)
                                     if i + 8 < b_count {
-                                        let future_idx =
-                                            (*b_ptr.add(i + 8)).p_idx as usize;
-                                        let ptr = pd_ptr.add(future_idx)
-                                            as *const u8;
+                                        let future_idx = (*b_ptr.add(i + 8)).p_idx as usize;
+                                        let ptr = pd_ptr.add(future_idx) as *const u8;
                                         #[cfg(target_arch = "aarch64")]
                                         std::arch::asm!(
                                             "prfm pldl2keep, [{ptr}]",
@@ -655,71 +646,42 @@ fn solve(
                             // Fix #1: use `<` not `<=`
                             let mut i = k32 as i32;
                             while i >= 0
-                                && unsafe {
-                                    *rem.as_ptr().add(
-                                        (scan_j + i as u32) as usize,
-                                    )
-                                } <= 1
+                                && unsafe { *rem.as_ptr().add((scan_j + i as u32) as usize) } <= 1
                             {
                                 i -= 1;
                             }
 
                             if i < 0 {
                                 // All k+1 elements are <= 1 — candidate
-                                let cand_n = block_l
-                                    - overlap as u64
-                                    + scan_j as u64
-                                    + k;
+                                let cand_n = block_l - overlap as u64 + scan_j as u64 + k;
                                 if bench_mode {
                                     // Bench: check all candidates, count witnesses
-                                    if cand_n > k {
-                                        if exact_check(
-                                            cand_n,
-                                            k,
-                                            &prime_data[..chunk_total_primes],
-                                        ) {
-                                            witness_count.fetch_add(1, Relaxed);
-                                            // Track minimum witness
-                                            let mut current =
-                                                global_min_n.load(Relaxed);
-                                            while cand_n < current {
-                                                match global_min_n
-                                                    .compare_exchange_weak(
-                                                        current,
-                                                        cand_n,
-                                                        Relaxed,
-                                                        Relaxed,
-                                                    )
-                                                {
-                                                    Ok(_) => break,
-                                                    Err(c) => current = c,
-                                                }
+                                    if cand_n > k
+                                        && exact_check(cand_n, k, &prime_data[..chunk_total_primes])
+                                    {
+                                        witness_count.fetch_add(1, Relaxed);
+                                        // Track minimum witness
+                                        let mut current = global_min_n.load(Relaxed);
+                                        while cand_n < current {
+                                            match global_min_n.compare_exchange_weak(
+                                                current, cand_n, Relaxed, Relaxed,
+                                            ) {
+                                                Ok(_) => break,
+                                                Err(c) => current = c,
                                             }
                                         }
                                     }
                                 } else if cand_n > k
-                                    && cand_n
-                                        < global_min_n.load(Relaxed)
+                                    && cand_n < global_min_n.load(Relaxed)
+                                    && exact_check(cand_n, k, &prime_data[..chunk_total_primes])
                                 {
-                                    if exact_check(
-                                        cand_n,
-                                        k,
-                                        &prime_data[..chunk_total_primes],
-                                    ) {
-                                        let mut current =
-                                            global_min_n.load(Relaxed);
-                                        while cand_n < current {
-                                            match global_min_n
-                                                .compare_exchange_weak(
-                                                    current,
-                                                    cand_n,
-                                                    Relaxed,
-                                                    Relaxed,
-                                                )
-                                            {
-                                                Ok(_) => break,
-                                                Err(c) => current = c,
-                                            }
+                                    let mut current = global_min_n.load(Relaxed);
+                                    while cand_n < current {
+                                        match global_min_n.compare_exchange_weak(
+                                            current, cand_n, Relaxed, Relaxed,
+                                        ) {
+                                            Ok(_) => break,
+                                            Err(c) => current = c,
                                         }
                                     }
                                 }
@@ -747,16 +709,14 @@ fn solve(
 
                     // Progress + checkpoint (fix #5; skip checkpoint in bench mode)
                     if chunk_id > n_threads as u64 && chunk_id % 1000 == 0 {
-                        let safe_l = start_l
-                            + chunk_id.saturating_sub(n_threads as u64)
-                                * CHUNK_SIZE;
+                        let safe_l =
+                            start_l + chunk_id.saturating_sub(n_threads as u64) * CHUNK_SIZE;
                         if !bench_mode {
                             write_checkpoint(k, safe_l);
                         }
 
                         let elapsed = t_start.elapsed().as_secs_f64();
-                        let done =
-                            (safe_l - start_l) as f64;
+                        let done = (safe_l - start_l) as f64;
                         let total = (end_l - start_l) as f64;
                         let pct = done / total * 100.0;
                         let rate = done / elapsed;
@@ -777,7 +737,11 @@ fn solve(
         }
     });
 
-    (global_min_n.load(Relaxed), current_chunk.load(Relaxed), witness_count.load(Relaxed))
+    (
+        global_min_n.load(Relaxed),
+        current_chunk.load(Relaxed),
+        witness_count.load(Relaxed),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -874,7 +838,14 @@ fn main() {
     for k in k_start..=k_max {
         let ts = Instant::now();
         let (ans, _chunks, witnesses) = solve(
-            k, start_l, end_l, &prime_data, n_threads, run_log, progress, bench_secs,
+            k,
+            start_l,
+            end_l,
+            &prime_data,
+            n_threads,
+            run_log,
+            progress,
+            bench_secs,
         );
         let sec = ts.elapsed().as_secs_f64();
 
@@ -894,7 +865,12 @@ fn main() {
         // Universal benchmark contract: one R-line per k on stdout
         let line = format!(
             "R\t{}\t{}\t{:.4}\t{}\t{:.2}\t{}",
-            k, witness_str, sec, candidates, speed / 1e6, witnesses
+            k,
+            witness_str,
+            sec,
+            candidates,
+            speed / 1e6,
+            witnesses
         );
         println!("{}", line);
 

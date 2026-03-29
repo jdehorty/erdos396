@@ -29,6 +29,34 @@ jobs:
         run: |
           cargo run --bin validate -- -k 1 --start 0 --end 1000 --workers 1 -o validate_ci_smoke --checkpoint-interval 500 --report-interval 1
           python3 certificates/scripts/check_validate_report.py validate_ci_smoke/validate_report_k1_0_1000.json
+      - name: Accuracy signatures (search-lab sieve correctness)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=target/release/erdos396-search-lab
+          STATUS=0
+          # 10M-candidate windows centered on the known minimum witness for each k (OEIS A375077).
+          # Deterministic: any correct sieve must produce these exact candidate/witness counts.
+          check() {
+            local K=$1 START=$2 END=$3 EXP_CAND=$4 EXP_WIT=$5
+            local LINE CAND WIT
+            LINE=$($BIN -k "$K" --kmax "$K" --start "$START" --end "$END" --threads 2 --bench 999 2>/dev/null | grep "^R")
+            CAND=$(echo "$LINE" | cut -f5)
+            WIT=$(echo "$LINE" | cut -f7)
+            if [ "$CAND" = "$EXP_CAND" ] && [ "$WIT" = "$EXP_WIT" ]; then
+              echo "  k=$K  OK  candidates=$CAND witnesses=$WIT"
+            else
+              echo "  k=$K  FAIL  expected=$EXP_CAND/$EXP_WIT got=$CAND/$WIT"
+              STATUS=1
+            fi
+          }
+          check 8  335000000       345000000       10000000 1
+          check 9  1015000000      1025000000      10000000 1
+          check 10 17605000000     17615000000     10000000 1
+          check 11 1070853000000   1070863000000   10000000 1
+          check 12 5048886000000   5048896000000   10000000 1
+          check 13 18253125000000  18253135000000  10000000 1
+          exit $STATUS
 
   lean:
     name: Lean (lake build)
