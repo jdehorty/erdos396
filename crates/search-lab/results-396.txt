@@ -1,6 +1,0 @@
-k =  9 | min n =      1019547844 | Time:       0.2007 s | Speed:  3386.02 M candidates/s
-k = 10 | min n =     17609764994 | Time:       6.7796 s | Speed:  2447.07 M candidates/s
-k = 11 | min n =            none | Time:      20.9288 s | Speed:  2389.05 M candidates/s
-k = 13 | min n =  18253129921842 | Time:      44.8077 s | Speed:  1501.97 M candidates/s
-R	9	1019547844	0.4822	679598593	1409.46
-R	11	none	0.0036	100000	27.51

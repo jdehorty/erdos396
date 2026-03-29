@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
 
 type Prime = u32;
@@ -420,16 +420,56 @@ fn solve(
     prime_data: &[PrimeData],
     n_threads: u32,
     _run_log_threshold: u64, // TODO: wire up run-length logging
-) -> u64 {
+    progress: bool,
+    bench_secs: f64, // 0.0 = disabled; >0 = sieve for this many seconds, ignore witnesses
+) -> (u64, u64, u64) {
+    // Returns (min_witness, chunks_processed, witness_count)
     let k32 = k as u32;
     let two_k = 2 * k;
     let t_start = Instant::now();
+    let bench_mode = bench_secs > 0.0;
 
     let global_min_n = AtomicU64::new(u64::MAX);
     let current_chunk = AtomicU64::new(0);
     let longest_seen = AtomicU64::new(0);
+    let witness_count = AtomicU64::new(0);
+    let time_up = AtomicBool::new(false);
 
     std::thread::scope(|s| {
+        // Progress reporter thread: prints throughput every 500ms
+        if progress {
+            let current_chunk_ref = &current_chunk;
+            let global_min_ref = &global_min_n;
+            let time_up_ref = &time_up;
+            s.spawn(move || {
+                let mut last_chunks: u64 = 0;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let chunks_now = current_chunk_ref.load(Relaxed);
+                    let delta = chunks_now - last_chunks;
+                    let candidates_delta = delta * CHUNK_SIZE;
+                    let mcps = candidates_delta as f64 / 0.5 / 1e6;
+                    let total_candidates = chunks_now * CHUNK_SIZE;
+                    let elapsed = t_start.elapsed().as_secs_f64();
+                    let cumulative_mcps = total_candidates as f64 / elapsed / 1e6;
+                    eprintln!(
+                        "P\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.4}",
+                        k, mcps, cumulative_mcps, total_candidates as f64 / 1e9, elapsed
+                    );
+                    last_chunks = chunks_now;
+
+                    // Stop when workers are done
+                    if time_up_ref.load(Relaxed) {
+                        break;
+                    }
+                    let l_chunk = start_l + chunks_now * CHUNK_SIZE;
+                    if l_chunk >= end_l || l_chunk > global_min_ref.load(Relaxed) {
+                        break;
+                    }
+                }
+            });
+        }
+
         for _ in 0..n_threads {
             s.spawn(|| {
                 // rem buffer: BLOCK_SIZE + k + 1 for overlap (fix #4)
@@ -450,7 +490,17 @@ fn solve(
                     if l_chunk >= end_l {
                         break;
                     }
-                    if l_chunk > global_min_n.load(Relaxed) {
+                    if bench_mode {
+                        // In bench mode: check time every 100 chunks, ignore witnesses
+                        if chunk_id % 100 == 0
+                            && t_start.elapsed().as_secs_f64() >= bench_secs
+                        {
+                            time_up.store(true, Relaxed);
+                        }
+                        if time_up.load(Relaxed) {
+                            break;
+                        }
+                    } else if l_chunk > global_min_n.load(Relaxed) {
                         break;
                     }
 
@@ -620,7 +670,34 @@ fn solve(
                                     - overlap as u64
                                     + scan_j as u64
                                     + k;
-                                if cand_n > k
+                                if bench_mode {
+                                    // Bench: check all candidates, count witnesses
+                                    if cand_n > k {
+                                        if exact_check(
+                                            cand_n,
+                                            k,
+                                            &prime_data[..chunk_total_primes],
+                                        ) {
+                                            witness_count.fetch_add(1, Relaxed);
+                                            // Track minimum witness
+                                            let mut current =
+                                                global_min_n.load(Relaxed);
+                                            while cand_n < current {
+                                                match global_min_n
+                                                    .compare_exchange_weak(
+                                                        current,
+                                                        cand_n,
+                                                        Relaxed,
+                                                        Relaxed,
+                                                    )
+                                                {
+                                                    Ok(_) => break,
+                                                    Err(c) => current = c,
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if cand_n > k
                                     && cand_n
                                         < global_min_n.load(Relaxed)
                                 {
@@ -668,12 +745,14 @@ fn solve(
                         block_start += BLOCK_SIZE;
                     }
 
-                    // Progress + checkpoint (fix #5)
+                    // Progress + checkpoint (fix #5; skip checkpoint in bench mode)
                     if chunk_id > n_threads as u64 && chunk_id % 1000 == 0 {
                         let safe_l = start_l
                             + chunk_id.saturating_sub(n_threads as u64)
                                 * CHUNK_SIZE;
-                        write_checkpoint(k, safe_l);
+                        if !bench_mode {
+                            write_checkpoint(k, safe_l);
+                        }
 
                         let elapsed = t_start.elapsed().as_secs_f64();
                         let done =
@@ -698,7 +777,7 @@ fn solve(
         }
     });
 
-    global_min_n.load(Relaxed)
+    (global_min_n.load(Relaxed), current_chunk.load(Relaxed), witness_count.load(Relaxed))
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +790,8 @@ fn main() {
     let mut end_l = u64::MAX;
     let mut k_max = 20u64;
     let mut run_log: u64 = 10;
+    let mut progress = false;
+    let mut bench_secs: f64 = 0.0;
     let mut n_threads = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(1);
@@ -742,9 +823,16 @@ fn main() {
                 i += 1;
                 run_log = args[i].parse().unwrap();
             }
+            "--progress" => {
+                progress = true;
+            }
+            "--bench" => {
+                i += 1;
+                bench_secs = args[i].parse().unwrap();
+            }
             _ => {
                 eprintln!(
-                    "Usage: {} [-k K] [--start N] [--end N] [--kmax KMAX] [--threads T] [--run-log N]",
+                    "Usage: {} [-k K] [--start N] [--end N] [--kmax KMAX] [--threads T] [--run-log N] [--progress] [--bench SECS]",
                     args[0]
                 );
                 std::process::exit(1);
@@ -758,26 +846,43 @@ fn main() {
     } else {
         format!("{}", end_l)
     };
-    println!(
+    let info_hdr = format!(
         "# erdos396-search-lab | threads={} k={}..{} start={} end={}",
         n_threads, k_start, k_max, start_l, end_str
     );
+    let bench_mode_cli = bench_secs > 0.0;
+    if bench_mode_cli {
+        eprintln!("{}", info_hdr);
+    } else {
+        println!("{}", info_hdr);
+    }
 
     let t0 = Instant::now();
     let primes = sieve_primes(200_000_000);
     let prime_data = build_prime_data(&primes);
-    println!(
+    let info_primes = format!(
         "# primes: {} in {:.3}s",
         primes.len(),
         t0.elapsed().as_secs_f64()
     );
+    if bench_mode_cli {
+        eprintln!("{}", info_primes);
+    } else {
+        println!("{}", info_primes);
+    }
 
     for k in k_start..=k_max {
         let ts = Instant::now();
-        let ans = solve(k, start_l, end_l, &prime_data, n_threads, run_log);
+        let (ans, _chunks, witnesses) = solve(
+            k, start_l, end_l, &prime_data, n_threads, run_log, progress, bench_secs,
+        );
         let sec = ts.elapsed().as_secs_f64();
 
-        let (witness_str, candidates) = if ans < u64::MAX && ans >= start_l {
+        let (witness_str, candidates) = if bench_secs > 0.0 && end_l < u64::MAX {
+            ("bench".to_string(), end_l - start_l)
+        } else if bench_secs > 0.0 {
+            ("bench".to_string(), _chunks * CHUNK_SIZE)
+        } else if ans < u64::MAX && ans >= start_l {
             (ans.to_string(), ans - start_l + 1)
         } else if end_l < u64::MAX {
             ("none".to_string(), end_l - start_l)
@@ -785,23 +890,33 @@ fn main() {
             ("none".to_string(), 1)
         };
         let speed = candidates as f64 / sec;
+
+        // Universal benchmark contract: one R-line per k on stdout
         let line = format!(
-            "R\t{}\t{}\t{:.4}\t{}\t{:.2}",
-            k, witness_str, sec, candidates, speed / 1e6
+            "R\t{}\t{}\t{:.4}\t{}\t{:.2}\t{}",
+            k, witness_str, sec, candidates, speed / 1e6, witnesses
         );
         println!("{}", line);
 
-        if let Ok(mut f) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("results.txt")
-        {
-            let _ = writeln!(f, "{}", line);
+        if !bench_mode_cli {
+            if let Ok(mut f) = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("results.txt")
+            {
+                let _ = writeln!(f, "{}", line);
+            }
         }
 
-        start_l = ans;
-        write_checkpoint(k + 1, start_l);
+        if bench_secs > 0.0 {
+            // In bench mode: don't chain k values, don't checkpoint
+        } else {
+            start_l = ans;
+            write_checkpoint(k + 1, start_l);
+        }
     }
 
-    let _ = fs::remove_file("checkpoint.txt");
+    if bench_secs <= 0.0 {
+        let _ = fs::remove_file("checkpoint.txt");
+    }
 }

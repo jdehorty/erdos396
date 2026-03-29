@@ -1,10 +1,9 @@
 # search-lab
 
 An experimental workspace providing a common ground for comparing search
-algorithm optimizations across languages and implementations. Each approach
-runs against the same standardized benchmarks (k=8, k=9, k=10, k=13 over
-known witness ranges), making it straightforward to determine what actually
-improves throughput and what does not.
+algorithm optimizations across languages and implementations. All
+implementations target the same Universal Benchmark Interface (below),
+making it straightforward to determine what actually improves throughput.
 
 Optimizations are prototyped and measured here before being integrated into the
 main `erdos396` crate.
@@ -14,8 +13,9 @@ main `erdos396` crate.
 ```
 search-lab/
 ├── justfile                Build, benchmark, and clean recipes
-├── bench-rust.md           Baseline Rust benchmark results
-├── parse_bench.py          Benchmark output parser
+├── bench-rust.md           Rust benchmark results
+├── bench-cpp.md            C++ benchmark results
+├── parse_bench.py          R-line → markdown table converter
 ├── .cargo/config.toml      Rust build flags (target-cpu=native)
 ├── src/main.rs             Rust implementation
 └── cpp-reference/
@@ -35,16 +35,18 @@ just build-cpp    # C++ only
 ## Benchmarking
 
 ```sh
-just bench-rust   # Rust (run first, on a cold CPU)
-just bench-cpp    # C++ (run separately, after cooldown)
+just bench-rust   # Rust
+just bench-cpp    # C++
 
 # Override thread count
 just threads=8 bench-rust
 ```
 
-Run each benchmark separately to avoid thermal throttling from back-to-back
-CPU saturation. The benchmarks parse per-k timing from binary output (sieve
-generation time excluded).
+Results are written to `bench-rust.md` / `bench-cpp.md`. The benchmark
+sweeps k=8 through k=13, each over a fixed n-range that includes the
+known minimum witness. Candidate counts and witness counts serve as a
+deterministic accuracy signature — if the sieve is correct, these are
+identical across implementations.
 
 ## Usage
 
@@ -52,6 +54,122 @@ generation time excluded).
 cargo run -p erdos396-search-lab --release -- -k 9
 cargo run -p erdos396-search-lab --release -- -k 13 --threads 8 --start 1000000 --end 25000000000000
 ```
+
+---
+
+## Universal Benchmark Interface
+
+### How the benchmark works
+
+The benchmark measures steady-state sieve throughput by sweeping a fixed
+range of the number line for each k value (k=8 through k=13). Each range
+is chosen so that:
+
+1. **It includes the known minimum witness** for that k (OEIS A375077),
+   placing the sweep at the sieve depth characteristic of real search work.
+2. **It runs for roughly 6 seconds**, long enough to reach thermal
+   steady state but short enough to avoid excessive thermal throttling.
+3. **Candidates and witnesses are deterministic.** For a given range
+   `[start, end)` and k, the number of candidates checked (`end − start`)
+   and the number of witnesses found are fixed by the mathematics — they
+   do not depend on the implementation, language, or hardware. These two
+   numbers form the **accuracy signature** of the run.
+
+The accuracy signature is the key to fidelity. If an implementation reports
+the correct candidate count and witness count, its sieve and verification
+logic are producing the same results as every other correct implementation.
+Only then is the throughput number (candidates per second) a meaningful
+comparison. If either signature value differs, the implementation has a bug
+and its throughput is not comparable.
+
+### Interface specification
+
+Any implementation targeting search-lab benchmarks **must** conform to this
+interface. The `just bench` recipe invokes the binary **once per k value**
+(each with `--kmax` equal to `-k`) and pipes stdout through
+`parse_bench.py` to produce the results table.
+
+### CLI contract
+
+The benchmark harness invokes the binary as:
+
+```
+<binary> -k K --kmax K --start N --end N --threads T --bench 999
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `-k K` | yes | The k value for this run |
+| `--kmax K` | yes | Set equal to `-k` (one k per invocation) |
+| `--start N` | yes | First candidate position, inclusive |
+| `--end N` | yes | Last candidate position, exclusive. The range `[start, end)` defines the sweep. |
+| `--threads T` | yes | Number of worker threads |
+| `--bench SECS` | yes (bench) | **Benchmark mode.** The binary must: **(1)** sieve the **entire** range `[start, end)` without terminating early when a witness is found, **(2)** count every witness discovered, and **(3)** disable all file I/O (checkpointing, result logging) so disk writes do not perturb timing. The `SECS` argument is a time-limit safety valve (the harness passes `999`; position-based termination via `--end` takes effect first). |
+
+Without `--bench`, the binary may operate in normal search mode (stop at
+the first witness, checkpoint progress, chain k values, etc.). The
+benchmark harness always passes `--bench`.
+
+### Output contract
+
+**Stdout** must contain exactly one R-line per k value. Additional lines
+starting with `#` are permitted (informational; ignored by the parser).
+No other output may appear on stdout.
+
+**R-line format** — seven tab-separated fields, prefixed with the literal
+character `R`:
+
+```
+R<TAB>k<TAB>witness<TAB>elapsed_s<TAB>candidates<TAB>speed_mcps<TAB>witnesses_found
+```
+
+| Field | Type | Format | Description |
+|-------|------|--------|-------------|
+| `R` | literal | `R` | Line prefix (allows the parser to skip `#` comment lines) |
+| `k` | int | `%d` | The k value |
+| `witness` | string | | `"bench"` in benchmark mode. In search mode: the witness n, or `"none"`. |
+| `elapsed_s` | float | `%.4f` | Wall-clock sieve time in seconds. Must **exclude** prime-table generation. |
+| `candidates` | int | `%d` | Exact number of candidates in the sweep: `end − start`. This is a deterministic value for a given range — not an approximation. |
+| `speed_mcps` | float | `%.2f` | `candidates / elapsed_s / 1e6` (millions of candidates per second) |
+| `witnesses_found` | int | `%d` | Total witnesses verified in the range. Together with `candidates`, this forms the **deterministic accuracy signature** for the run. |
+
+**Example R-line** (k=8 sweep):
+
+```
+R	8	bench	5.9359	18339949252	3089.74	40
+```
+
+**Stderr** is free for progress output, diagnostics, and warnings.
+
+### Benchmark sweep ranges and expected signature
+
+The `just bench` recipe sweeps the following predetermined ranges. Each
+range covers a fixed segment of the number line at that k's sieve depth;
+the known minimum OEIS A375077 witness for each k falls within its range.
+
+| k | Range | Candidates | Witnesses |
+|--:|:------|-----------:|----------:|
+| 8 | `[169,974,626, 18,509,923,878)` | 18,339,949,252 | 40 |
+| 9 | `[509,773,922, 19,029,321,766)` | 18,519,547,844 | 3 |
+| 10 | `[8,804,882,497, 25,749,999,991)` | 16,945,117,494 | 1 |
+| 11 | `[1,062,858,041,585, 1,078,999,999,999)` | 16,141,958,414 | 1 |
+| 12 | `[5,042,391,644,646, 5,055,499,999,999)` | 13,108,355,353 | 1 |
+| 13 | `[18,247,629,921,842, 18,258,749,999,999)` | 11,120,078,157 | 1 |
+
+**Both columns — Candidates and Witnesses — are the deterministic accuracy
+signature.** Any correct implementation must produce these exact values for
+the above ranges. A mismatch in either column indicates a bug in the sieve
+or witness verification logic. Only after the signature is verified should
+throughput numbers be compared.
+
+### Adding a new implementation
+
+1. Write a binary that conforms to the CLI and output contracts above.
+2. Add a `build-<impl>` and `bench-<impl>` recipe to the justfile,
+   following the existing Rust/C++ patterns.
+3. Run `just bench-<impl>` and verify that candidates and witness counts
+   match the expected signature table **exactly** before comparing
+   throughput.
 
 ---
 
@@ -362,13 +480,14 @@ which has good spatial locality for small primes.
 
 ## Performance History
 
-Starting from a naive Rust port at 247 M/s (k=8), successive optimizations:
+Relative improvement of each optimization, measured against the preceding
+baseline. The starting point was a naive Rust port with runtime hardware
+division and no bucketing.
 
-| Optimization | k=8 (M/s) | k=13 (M/s) | Key insight |
-|:-------------|----------:|----------:|:------------|
-| Baseline (runtime div, no bucketing) | 247 | 1,229 | |
-| Bucketed sieve architecture | 260 | 1,229 | Only process primes with multiples in block |
-| Barrett reduction | 3,787 | 1,386 | Replace hardware div with 128-bit mul+shift |
-| ARM64 prefetch + target-cpu=native | 3,999 | 1,504 | prfm instruction was entirely missing on ARM |
-| repr(C) cache-aligned PrimeData | 4,670 | 1,480 | Hot fields first in cache line |
-| **C++ reference** | **4,338** | **1,353** | Sharvil Kesarwani's implementation |
+| # | Optimization | Δ k=8 | Δ k=13 | Key insight |
+|--:|:-------------|------:|-------:|:------------|
+| 0 | Baseline (runtime div, no bucketing) | — | — | |
+| 1 | Bucketed sieve architecture | +5% | +0% | Only process primes with multiples in block |
+| 2 | Barrett reduction | +14.6× | +1.13× | Replace hardware div with 128-bit mul+shift |
+| 3 | ARM64 prefetch + target-cpu=native | +5.6% | +8.5% | `prfm` instruction was entirely missing on ARM |
+| 4 | repr(C) cache-aligned PrimeData | +16.8% | −1.6% | Hot fields first in cache line |

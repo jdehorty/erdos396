@@ -13,9 +13,6 @@
 # Override with: just threads=8 bench
 threads := `python3 -c "import os; print(os.cpu_count() or 4)"`
 
-# Cool-down between k values to avoid thermal throttling (seconds)
-cooldown := "8"
-
 # ─── Build ────────────────────────────────────────────────────────────
 
 # Build the Rust binary in release mode
@@ -32,8 +29,8 @@ build: build-rust build-cpp
 # ─── Benchmark ────────────────────────────────────────────────────────
 #
 # Steady-state throughput benchmark. For each k=8..13, sieves a fixed
-# {{candidates}} candidates starting from the known witness position.
-# Each k runs in a separate invocation with {{cooldown}}s cool-down.
+# range starting from the known witness position. Each k runs in a
+# separate binary invocation; R-lines are turned into markdown rows via parse_bench.py.
 #
 # Known witnesses (OEIS A375077):
 #   k=8:  339,949,252             k=11: 1,070,858,041,585
@@ -46,7 +43,6 @@ bench impl="rust":
     set -euo pipefail
     IMPL="{{impl}}"
     THREADS="{{threads}}"
-    COOLDOWN="{{cooldown}}"
 
     # Dispatch to correct binary, build step, and compiler info
     case "$IMPL" in
@@ -89,7 +85,7 @@ bench impl="rust":
         echo ""
         echo "Steady-state throughput at each k's witness position. Fixed n-ranges"
         echo "tuned for ~6s runtime; candidate counts and witness counts serve as"
-        echo "the deterministic accuracy signature. ${COOLDOWN}s cool-down between."
+        echo "the deterministic accuracy signature."
         echo ""
         echo "## Environment"
         echo ""
@@ -124,20 +120,9 @@ bench impl="rust":
         END="${ENDS[$K]}"
         echo "  k=$K: [$START, $END)..." >&2
 
-        if [[ "$IMPL" == "rust" ]]; then
-            "$BIN" -k "$K" --kmax "$K" --start "$START" --end "$END" \
-                --threads "$THREADS" --bench 999 >> "$OUT" 2>/dev/null || true
-        else
-            # C++ fallback (no --bench support)
-            "$BIN" -k "$K" --kmax "$K" --start "$START" --end "$END" \
-                --threads "$THREADS" >> "$OUT" 2>/dev/null || true
-        fi
-
-        # Cool-down between k values (skip after last)
-        if [[ "$K" -lt 13 ]]; then
-            echo "  cooling down ${COOLDOWN}s..." >&2
-            sleep "$COOLDOWN"
-        fi
+        "$BIN" -k "$K" --kmax "$K" --start "$START" --end "$END" \
+            --threads "$THREADS" --bench 999 2>/dev/null \
+            | python3 parse_bench.py - >> "$OUT" || true
     done
 
     echo "" | tee -a "$OUT"
@@ -162,7 +147,6 @@ bench-rust-pgo:
     set -euo pipefail
     PGO_DIR="{{pgo_dir}}"
     THREADS="{{threads}}"
-    COOLDOWN="{{cooldown}}"
 
     echo "=== Rust PGO Pipeline ===" >&2
     echo "" >&2
@@ -221,7 +205,7 @@ bench-rust-pgo:
         echo "Steady-state throughput with Profile-Guided Optimization. Trained on k=9,10"
         echo "full ranges + k=13 10B slice before optimized rebuild. Fixed n-ranges"
         echo "tuned for ~6s runtime; candidate counts and witness counts serve as"
-        echo "the deterministic accuracy signature. ${COOLDOWN}s cool-down between."
+        echo "the deterministic accuracy signature."
         echo ""
         echo "## Environment"
         echo ""
@@ -244,30 +228,22 @@ bench-rust-pgo:
 
     TMPOUT=$(mktemp)
 
-    declare -A STARTS CANDS
-    STARTS[8]=339949252;          CANDS[8]=18000000000
-    STARTS[9]=1019547844;         CANDS[9]=18000000000
-    STARTS[10]=17609764994;       CANDS[10]=17000000000
-    STARTS[11]=1070858041585;     CANDS[11]=16000000000
-    STARTS[12]=5048891644646;     CANDS[12]=13000000000
-    STARTS[13]=18253129921842;    CANDS[13]=11000000000
+    declare -A STARTS ENDS
+    STARTS[8]=169974626;          ENDS[8]=18509923878
+    STARTS[9]=509773922;          ENDS[9]=19029321766
+    STARTS[10]=8804882497;        ENDS[10]=25749999991
+    STARTS[11]=1062858041585;     ENDS[11]=1078999999999
+    STARTS[12]=5042391644646;     ENDS[12]=5055499999999
+    STARTS[13]=18247629921842;    ENDS[13]=18258749999999
 
     for K in 8 9 10 11 12 13; do
         START="${STARTS[$K]}"
-        NC="${CANDS[$K]}"
-        END=$(( START + NC ))
-        NC_FMT=$(python3 -c "print(format(${NC}, ','))")
-        echo "  k=$K: [${START}, ${END}) — ${NC_FMT} candidates..." >&2
+        END="${ENDS[$K]}"
+        echo "  k=$K: [$START, $END)..." >&2
         "$BIN" -k "$K" --kmax "$K" --start "$START" --end "$END" \
-            --threads "$THREADS" --bench 999 >> "$TMPOUT" 2>/dev/null || true
-        if [[ "$K" -lt 13 ]]; then
-            echo "  cooling down ${COOLDOWN}s..." >&2
-            sleep "$COOLDOWN"
-        fi
+            --threads "$THREADS" --bench 999 2>/dev/null \
+            | python3 parse_bench.py - >> "$OUT" || true
     done
-
-    python3 parse_bench.py "$TMPOUT" >> "$OUT" 2>&2
-    rm -f "$TMPOUT"
 
     echo "" | tee -a "$OUT"
     echo "Results written to: $OUT" >&2

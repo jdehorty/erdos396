@@ -259,11 +259,17 @@ inline void process_p_dyn(uint32_t p, uint64_t inv_p, uint64_t limit, uint32_t& 
     start_j = j - W_block;
 }
 
-uint64_t solve(uint64_t k, uint64_t start_L, uint64_t end_L = UINT64_MAX)
+struct SolveResult {
+    uint64_t min_witness;
+    uint64_t witness_count;
+};
+
+SolveResult solve(uint64_t k, uint64_t start_L, uint64_t end_L = UINT64_MAX, bool bench_mode = false)
 {
     const uint64_t CHUNK_SIZE = 1048576;
     std::atomic<uint64_t> current_chunk{0};
     std::atomic<uint64_t> global_min_n{static_cast<uint64_t>(-1)};
+    std::atomic<uint64_t> witness_count{0};
 
     auto worker = [&]() {
         const uint32_t OPT_BLOCK_SIZE = 32768;
@@ -281,9 +287,9 @@ uint64_t solve(uint64_t k, uint64_t start_L, uint64_t end_L = UINT64_MAX)
             uint64_t L_chunk = start_L + chunk_id * CHUNK_SIZE;
             uint64_t R_chunk = L_chunk + CHUNK_SIZE + k - 1;
 
-            if (L_chunk > global_min_n.load(std::memory_order_relaxed))
-                break;
             if (L_chunk >= end_L)
+                break;
+            if (!bench_mode && L_chunk > global_min_n.load(std::memory_order_relaxed))
                 break;
 
             uint32_t CHUNK_W = (uint32_t)(R_chunk - L_chunk + 1);
@@ -409,7 +415,16 @@ uint64_t solve(uint64_t k, uint64_t start_L, uint64_t end_L = UINT64_MAX)
                     if (i < 0)
                     {
                         uint64_t n = block_L - overlap + j + k;
-                        if (n > k && n < global_min_n.load(std::memory_order_relaxed))
+                        if (bench_mode)
+                        {
+                            if (n > k && exact_check(n, k))
+                            {
+                                witness_count.fetch_add(1, std::memory_order_relaxed);
+                                uint64_t current = global_min_n.load(std::memory_order_relaxed);
+                                while (n < current && !global_min_n.compare_exchange_weak(current, n, std::memory_order_relaxed)) {}
+                            }
+                        }
+                        else if (n > k && n < global_min_n.load(std::memory_order_relaxed))
                         {
                             if (exact_check(n, k))
                             {
@@ -438,22 +453,25 @@ uint64_t solve(uint64_t k, uint64_t start_L, uint64_t end_L = UINT64_MAX)
                 }
             }
 
-            static std::atomic<bool> is_writing{false};
-            if (chunk_id > NUM_THREADS && chunk_id % 1000 == 0)
+            if (!bench_mode)
             {
-                bool expected = false;
-                if (is_writing.compare_exchange_strong(expected, true))
+                static std::atomic<bool> is_writing{false};
+                if (chunk_id > NUM_THREADS && chunk_id % 1000 == 0)
                 {
-                    uint64_t safe_L = start_L + (chunk_id - NUM_THREADS) * CHUNK_SIZE;
-                    std::ofstream fout("checkpoint-396.tmp");
-                    if (fout)
+                    bool expected = false;
+                    if (is_writing.compare_exchange_strong(expected, true))
                     {
-                        fout << k << " " << safe_L << "\n";
-                        fout.close();
-                        std::error_code ec;
-                        std::filesystem::rename("checkpoint-396.tmp", "checkpoint-396.txt", ec);
+                        uint64_t safe_L = start_L + (chunk_id - NUM_THREADS) * CHUNK_SIZE;
+                        std::ofstream fout("checkpoint-396.tmp");
+                        if (fout)
+                        {
+                            fout << k << " " << safe_L << "\n";
+                            fout.close();
+                            std::error_code ec;
+                            std::filesystem::rename("checkpoint-396.tmp", "checkpoint-396.txt", ec);
+                        }
+                        is_writing.store(false, std::memory_order_release);
                     }
-                    is_writing.store(false, std::memory_order_release);
                 }
             }
         }
@@ -465,14 +483,15 @@ uint64_t solve(uint64_t k, uint64_t start_L, uint64_t end_L = UINT64_MAX)
     for (auto& t : threads)
         t.join();
 
-    return global_min_n.load();
+    return {global_min_n.load(), witness_count.load()};
 }
 
 int main(int argc, char** argv)
 {
     uint64_t start_k = 0, start_L = 0, end_L = UINT64_MAX, k_max = 20;
+    bool bench_mode = false;
 
-    // Parse CLI args: -k K, --start N, --end N, --kmax K, --threads T
+    // Parse CLI args: -k K, --start N, --end N, --kmax K, --threads T, --bench SECS
     for (int i = 1; i < argc; ++i)
     {
         std::string a = argv[i];
@@ -486,10 +505,15 @@ int main(int argc, char** argv)
             k_max = std::stoull(argv[++i]);
         else if (a == "--threads" && i + 1 < argc)
             NUM_THREADS = static_cast<unsigned int>(std::stoull(argv[++i]));
+        else if (a == "--bench" && i + 1 < argc)
+        {
+            ++i; // consume SECS (unused — bench mode just ignores witnesses)
+            bench_mode = true;
+        }
         else
         {
             std::cerr << "Usage: " << argv[0]
-                      << " [-k K] [--start N] [--end N] [--kmax K] [--threads T]\n";
+                      << " [-k K] [--start N] [--end N] [--kmax K] [--threads T] [--bench SECS]\n";
             return 1;
         }
     }
@@ -532,46 +556,67 @@ int main(int argc, char** argv)
     for (uint64_t k = start_k; k <= k_max; ++k)
     {
         auto start = std::chrono::high_resolution_clock::now();
-        uint64_t ans = solve(k, start_L, end_L);
+        auto result = solve(k, start_L, end_L, bench_mode);
         auto end = std::chrono::high_resolution_clock::now();
 
+        uint64_t ans = result.min_witness;
+        uint64_t witnesses = result.witness_count;
         std::chrono::duration<double> elapsed = end - start;
         double seconds = elapsed.count();
 
         uint64_t candidates_checked;
-        if (ans < UINT64_MAX && ans >= start_L)
-            candidates_checked = ans - start_L + 1;
-        else if (end_L < UINT64_MAX)
+        std::string witness_str;
+        if (bench_mode && end_L < UINT64_MAX)
+        {
             candidates_checked = end_L - start_L;
+            witness_str = "bench";
+        }
+        else if (ans < UINT64_MAX && ans >= start_L)
+        {
+            candidates_checked = ans - start_L + 1;
+            witness_str = std::to_string(ans);
+        }
+        else if (end_L < UINT64_MAX)
+        {
+            candidates_checked = end_L - start_L;
+            witness_str = "none";
+        }
         else
+        {
             candidates_checked = 1;
+            witness_str = "none";
+        }
         double speed = candidates_checked / seconds;
 
-        std::string witness_str = (ans < UINT64_MAX) ? std::to_string(ans) : "none";
         std::ostringstream oss;
         oss << "R\t" << k << "\t" << witness_str
             << "\t" << std::fixed << std::setprecision(4) << seconds
             << "\t" << candidates_checked
-            << "\t" << std::fixed << std::setprecision(2) << (speed / 1e6) << "\n";
+            << "\t" << std::fixed << std::setprecision(2) << (speed / 1e6)
+            << "\t" << witnesses << "\n";
 
         std::string output_str = oss.str();
         std::cout << output_str;
-        std::ofstream results_file("results-396.txt", std::ios::app);
-        if (results_file)
-            results_file << output_str;
 
-        if (ans < UINT64_MAX)
-            start_L = ans;
-        else
-            break; // no witness found in range, stop
-
-        std::ofstream fout("checkpoint-396.tmp");
-        if (fout)
+        if (!bench_mode)
         {
-            fout << (k + 1) << " " << start_L << "\n";
-            fout.close();
-            std::error_code ec;
-            std::filesystem::rename("checkpoint-396.tmp", "checkpoint-396.txt", ec);
+            std::ofstream results_file("results-396.txt", std::ios::app);
+            if (results_file)
+                results_file << output_str;
+
+            if (ans < UINT64_MAX)
+                start_L = ans;
+            else
+                break;
+
+            std::ofstream fout("checkpoint-396.tmp");
+            if (fout)
+            {
+                fout << (k + 1) << " " << start_L << "\n";
+                fout.close();
+                std::error_code ec;
+                std::filesystem::rename("checkpoint-396.tmp", "checkpoint-396.txt", ec);
+            }
         }
     }
 
