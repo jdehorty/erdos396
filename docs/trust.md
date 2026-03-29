@@ -58,7 +58,7 @@ This is the standard trust base for computational mathematics.
 To reduce practical risk in the Rust layer, we do the following:
 
 - **Independent witness verifier (Claim A)**  
-  `scripts/verify_witness.py` is a stdlib-only Python implementation of the
+  `certificates/scripts/verify_witness.py` is a stdlib-only Python implementation of the
   witness divisibility test. It provides an independent cross-check of witness
   validity separate from the Rust implementation.
 
@@ -96,7 +96,7 @@ To reduce practical risk in the Rust layer, we do the following:
   simple coverage invariants (sum and XOR of all scanned `n` values) to detect
   accidental gaps/overlaps. It writes a `validate_report_*.json` with the
   measured and expected invariants. The stdlib-only script
-  `scripts/check_validate_report.py` independently recomputes and checks these
+  `certificates/scripts/check_validate_report.py` independently recomputes and checks these
   invariants from the report, and can also verify that multiple chunk reports
   form a contiguous partition (`--check-partition`).
   Reports also embed build metadata (`git_hash`, toolchain) so results can be

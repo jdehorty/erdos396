@@ -1,0 +1,6 @@
+[package]
+name = "erdos396-search-lab"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal, bare-bones witness search for Erdős #396 — a lightweight testing ground for search algorithm improvements"
+license = "MIT"

@@ -51,7 +51,7 @@ The Lean project is expected to build with no `sorry`/`admit`.
 cargo run --release --bin verify -- --known
 
 # Independent cross-check (stdlib-only, no Rust involved)
-python3 scripts/verify_witness.py --known
+python3 certificates/scripts/verify_witness.py --known
 
 # Optional: machine-readable output
 cargo run --release --bin verify -- --known --json > verify_known.json
@@ -63,7 +63,7 @@ Run the provably complete validator (Corollary 6 screen + full verification):
 
 ```bash
 cargo run --release --bin validate -- -k 13 --start 0 --end 18253129921842 --workers 40
-python3 scripts/check_validate_report.py validate_checkpoints/validate_report_k13_0_18253129921842.json
+python3 certificates/scripts/check_validate_report.py validate_checkpoints/validate_report_k13_0_18253129921842.json
 ```
 
 The `validate_report_*.json` includes embedded build metadata (`git_hash`, toolchain) so reports can
@@ -74,7 +74,7 @@ Recommended robustness checks:
 
 - Rerun with a different `--workers` count and confirm the witness list and report invariants match.
 - If you run multiple contiguous chunks, verify the combined coverage invariants with
-  `python3 scripts/check_validate_report.py --check-partition validate_checkpoints/validate_report_k13_*.json`.
+  `python3 certificates/scripts/check_validate_report.py --check-partition validate_checkpoints/validate_report_k13_*.json`.
 - For long runs, consider enabling `--self-check-samples` (startup kernel checks) and/or
   `--audit-interval` (periodic in-run kernel checks).
 
@@ -99,7 +99,7 @@ On successful completion, `erdos396` writes a `search_report_*.json` into the ou
 (default `checkpoints/`). Independently check the report invariants with:
 
 ```bash
-python3 scripts/check_search_report.py checkpoints/search_report_k13_0_25000000000000.json
+python3 certificates/scripts/check_search_report.py checkpoints/search_report_k13_0_25000000000000.json
 ```
 
 If you also want to audit the run logs (`runs_k13_w*.jsonl`) to produce a false-positive catalog,

@@ -47,7 +47,7 @@ Independent verification paths:
 cargo run --release --bin verify -- --known
 
 # 1b. Independently verify witness validity (seconds, stdlib-only)
-python3 scripts/verify_witness.py --known
+python3 certificates/scripts/verify_witness.py --known
 
 # 2. Check the formal proof of the Small Prime Barrier Theorem (minutes)
 cd formal && lake build
@@ -56,32 +56,32 @@ cd formal && lake build
 cargo run --release --bin validate -- -k 13 --start 0 --end 18253129921842 --workers 40
 
 # 3b. Independently check the validate report invariants (seconds, stdlib-only)
-python3 scripts/check_validate_report.py validate_checkpoints/validate_report_k13_0_18253129921842.json
+python3 certificates/scripts/check_validate_report.py validate_checkpoints/validate_report_k13_0_18253129921842.json
 
 # 4. Verify the public certificate bundles for k=8 through k=13 (seconds)
 sha256sum -c certificates/validate/SHA256SUMS
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k8_0_169974626.json \
   certificates/validate/validate_report_k8_169974626_339949252.json \
   --check-partition
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k9_0_8804882496.json \
   certificates/validate/validate_report_k9_8804882496_17609764993.json \
   --check-partition
-python3 scripts/verify_witness.py -k 9 -n 1019547844
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/verify_witness.py -k 9 -n 1019547844
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k10_0_8804882497.json \
   certificates/validate/validate_report_k10_8804882497_17609764994.json \
   --check-partition
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k11_0_610796592505.json \
   certificates/validate/validate_report_k11_610796592505_1070858041585.json \
   --check-partition
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k12_0_2880387737783.json \
   certificates/validate/validate_report_k12_2880387737783_5048891644646.json \
   --check-partition
-python3 scripts/check_validate_report.py \
+python3 certificates/scripts/check_validate_report.py \
   certificates/validate/validate_report_k13_0_9684496742351.json \
   certificates/validate/validate_report_k13_9684496742351_18253129921842.json \
   --check-partition
@@ -102,7 +102,7 @@ support optional startup/periodic cross-checks (see `docs/reproducibility.md`).
 
 On successful completion, `erdos396` also writes a `search_report_*.json` into its output
 directory with coverage invariants (count/sum/XOR) and build metadata; reviewers can
-independently check it with `python3 scripts/check_search_report.py ...`.
+independently check it with `python3 certificates/scripts/check_search_report.py ...`.
 
 ## Method
 

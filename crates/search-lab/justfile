@@ -1,0 +1,185 @@
+# search-lab — build and benchmark recipes for Rust and C++ implementations
+#
+# Universal benchmark contract:
+#   CLI:    <binary> -k K --kmax KMAX --start N --end N --threads T --bench 999
+#   Output: "R\t{k}\t{witness}\t{elapsed_s}\t{candidates}\t{speed_mcps}\t{witnesses_found}"
+#           Lines starting with "#" are informational (ignored by parser)
+#           Stderr is free for progress/diagnostics
+
+# Override with: just threads=8 bench
+threads := `python3 -c "import os; print(os.cpu_count() or 4)"`
+
+pgo_dir := "/tmp/pgo-search-lab"
+
+# ─── Build ────────────────────────────────────────────────────────────
+
+# Build the Rust binary in release mode (no PGO — for development)
+build-rust:
+    cargo build -p erdos396-search-lab --release
+
+# Build the Rust binary with PGO (instrument → train → optimize)
+build-rust-pgo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PGO_DIR="{{pgo_dir}}"
+    THREADS="{{threads}}"
+    BIN="../../target/release/erdos396-search-lab"
+
+    # Step 1: Instrumented build
+    echo "  [PGO 1/4] Building instrumented binary..." >&2
+    rm -rf "$PGO_DIR"
+    mkdir -p "$PGO_DIR"
+    RUSTFLAGS="-C target-cpu=native -Cprofile-generate=$PGO_DIR" \
+        cargo build -p erdos396-search-lab --release 2>&1 | tail -1
+
+    # Step 2: Training runs (exercise hot sieve paths at different depths)
+    echo "  [PGO 2/4] Training on k=9,10 (full witness ranges)..." >&2
+    "$BIN" -k 9 --kmax 10 --start 339949252 --threads "$THREADS" > /dev/null 2>&1 || true
+    echo "  [PGO 2/4] Training on k=13 slice (10B candidates)..." >&2
+    "$BIN" -k 13 --kmax 13 --start 18243129921842 --end 18253129921842 \
+        --threads "$THREADS" > /dev/null 2>&1 || true
+
+    # Step 3: Merge profiles
+    echo "  [PGO 3/4] Merging profile data..." >&2
+    PROFDATA=$(which llvm-profdata 2>/dev/null || xcrun --find llvm-profdata 2>/dev/null)
+    "$PROFDATA" merge -o "$PGO_DIR/merged.profdata" "$PGO_DIR" 2>&1
+
+    # Step 4: Optimized build
+    echo "  [PGO 4/4] Building PGO-optimized binary..." >&2
+    RUSTFLAGS="-C target-cpu=native -Cprofile-use=$PGO_DIR/merged.profdata -Cllvm-args=-pgo-warn-missing-function" \
+        cargo build -p erdos396-search-lab --release 2>&1 | tail -1
+    echo "  PGO build complete." >&2
+
+# Build the C++ reference binary
+build-cpp:
+    cd cpp-reference && just build
+
+# Build everything (Rust with PGO + C++)
+build: build-rust-pgo build-cpp
+
+# ─── Benchmark ────────────────────────────────────────────────────────
+#
+# Steady-state throughput benchmark. For each k=8..13, sieves a fixed
+# range starting from the known witness position. Each k runs in a
+# separate binary invocation; R-lines are turned into markdown rows
+# via parse_bench.py.
+#
+# Rust builds use PGO by default. The Rust binary is instrumented,
+# trained on representative workloads (k=9,10 full + k=13 slice),
+# then rebuilt with profile data before benchmarking.
+#
+# Known witnesses (OEIS A375077):
+#   k=8:  339,949,252             k=11: 1,070,858,041,585
+#   k=9:  1,019,547,844           k=12: 5,048,891,644,646
+#   k=10: 17,609,764,994          k=13: 18,253,129,921,842
+
+# Benchmark a single implementation. impl must be "rust" or "cpp".
+bench impl="rust":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMPL="{{impl}}"
+    THREADS="{{threads}}"
+
+    # Dispatch to correct binary, build step, and compiler info
+    case "$IMPL" in
+        rust)
+            just build-rust-pgo
+            BIN="../../target/release/erdos396-search-lab"
+            COMPILER=$(rustc --version 2>/dev/null || echo "unknown")
+            TITLE="search-lab Benchmark (Rust)"
+            PGO_LINE='| **PGO** | yes (profile-generate + profile-use) |'
+            ;;
+        cpp)
+            just build-cpp
+            BIN="cpp-reference/erdos396_ref"
+            COMPILER=$(${CXX:-g++} --version 2>/dev/null | head -1 || echo "unknown")
+            TITLE="search-lab Benchmark (C++ reference, Sharvil Kesarwani)"
+            PGO_LINE=""
+            ;;
+        *)
+            echo "Unknown impl: $IMPL (use rust or cpp)" >&2
+            exit 1
+            ;;
+    esac
+    OUT="bench-${IMPL}.md"
+
+    # Detect environment
+    if [[ "$(uname)" == "Darwin" ]]; then
+        cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
+        mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+        mem="$(( mem_bytes / 1073741824 )) GB"
+        os_info="$(sw_vers -productName 2>/dev/null || echo macOS) $(sw_vers -productVersion 2>/dev/null || echo "")"
+    else
+        cpu=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "unknown")
+        mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+        mem="$(( mem_kb / 1048576 )) GB"
+        os_info=$(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"' || echo "Linux")
+    fi
+    git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    timestamp=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+    {
+        echo "# $TITLE"
+        echo ""
+        echo "Steady-state throughput at each k's witness position. Fixed n-ranges"
+        echo "tuned for ~6s runtime; candidate counts and witness counts serve as"
+        echo "the deterministic accuracy signature."
+        echo ""
+        echo "## Environment"
+        echo ""
+        echo "| | |"
+        echo "|---|---|"
+        echo "| **CPU** | $cpu |"
+        echo "| **Memory** | $mem |"
+        echo "| **OS** | $os_info |"
+        echo "| **Threads** | $THREADS |"
+        echo "| **Compiler** | \`$COMPILER\` |"
+        if [[ -n "$PGO_LINE" ]]; then echo "$PGO_LINE"; fi
+        echo "| **Commit** | \`$git_hash\` |"
+        echo "| **Date** | $timestamp |"
+        echo ""
+        echo "## Results"
+        echo ""
+        echo "| k | Range | Candidates | Witnesses | Time (s) | Throughput (M/s) |"
+        echo "|--:|:------|-----------:|----------:|---------:|-----------------:|"
+    } | tee "$OUT"
+
+    # Per-k sweep ranges [start, end). Each range includes the known minimum
+    # witness and is sized for ~6s of runtime at that k's sieve depth.
+    declare -A STARTS ENDS
+    STARTS[8]=169974626;          ENDS[8]=18509923878
+    STARTS[9]=509773922;          ENDS[9]=19029321766
+    STARTS[10]=8804882497;        ENDS[10]=25749999991
+    STARTS[11]=1062858041585;     ENDS[11]=1078999999999
+    STARTS[12]=5042391644646;     ENDS[12]=5055499999999
+    STARTS[13]=18247629921842;    ENDS[13]=18258749999999
+
+    for K in 8 9 10 11 12 13; do
+        START="${STARTS[$K]}"
+        END="${ENDS[$K]}"
+        echo "  k=$K: [$START, $END)..." >&2
+
+        "$BIN" -k "$K" --kmax "$K" --start "$START" --end "$END" \
+            --threads "$THREADS" --bench 999 2>/dev/null \
+            | python3 parse_bench.py - >> "$OUT" || true
+    done
+
+    echo "" | tee -a "$OUT"
+    echo "Results written to: $OUT" >&2
+
+    # Clean up transient files
+    rm -f results.txt checkpoint.txt checkpoint.tmp 2>/dev/null || true
+    rm -f cpp-reference/checkpoint-396.txt cpp-reference/checkpoint-396.tmp \
+          cpp-reference/results-396.txt 2>/dev/null || true
+
+# Convenience aliases
+bench-rust: (bench "rust")
+bench-cpp: (bench "cpp")
+
+# ─── Clean ────────────────────────────────────────────────────────────
+
+# Remove build artifacts
+clean:
+    cargo clean -p erdos396-search-lab
+    cd cpp-reference && just clean
+    rm -rf {{pgo_dir}}
