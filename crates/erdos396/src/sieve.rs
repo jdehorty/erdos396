@@ -27,8 +27,8 @@ pub struct PrimeData {
     /// prime per batch to compute the first multiple of p in the batch
     /// without hardware division.
     pub magic: u64,
-    /// The prime value.
-    pub p: u32,
+    /// The prime value (full u64 to support sieve limits above 2^32).
+    pub p: u64,
     /// `bit_width(p) - 1` — Barrett shift amount.
     pub shift: u8,
 }
@@ -56,9 +56,8 @@ pub fn build_prime_data(primes: &[u64]) -> Vec<PrimeData> {
     primes
         .iter()
         .map(|&p| {
-            let p32 = p as u32;
             let inv_p = if p % 2 != 0 { mod_inverse_u64(p) } else { 0 };
-            let shift = (32 - p32.leading_zeros()).saturating_sub(1) as u8;
+            let shift = (64 - p.leading_zeros()).saturating_sub(1) as u8;
             let magic = if p > 1 {
                 (((1u128 << (64 + shift as u32)) / p as u128) + 1) as u64
             } else {
@@ -68,7 +67,7 @@ pub fn build_prime_data(primes: &[u64]) -> Vec<PrimeData> {
                 inv_p,
                 max_quot: u64::MAX / p,
                 magic,
-                p: p32,
+                p,
                 shift,
             }
         })
@@ -315,15 +314,15 @@ mod tests {
         let pd = super::build_prime_data(sieve.primes());
         assert_eq!(pd.len(), sieve.len());
         for (i, d) in pd.iter().enumerate() {
-            assert_eq!(d.p as u64, sieve.primes()[i]);
+            assert_eq!(d.p, sieve.primes()[i]);
             if d.p > 2 {
                 assert_eq!(
-                    (d.p as u64).wrapping_mul(d.inv_p),
+                    d.p.wrapping_mul(d.inv_p),
                     1u64,
                     "inverse check failed for p={}",
                     d.p
                 );
-                assert_eq!(d.max_quot, u64::MAX / d.p as u64);
+                assert_eq!(d.max_quot, u64::MAX / d.p);
             }
         }
     }

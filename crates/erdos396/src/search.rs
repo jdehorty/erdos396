@@ -1697,7 +1697,8 @@ mod tests {
         assert!(
             result_fused.total_governors >= result_linear.total_governors,
             "Fused should be superset: fused={}, linear={}",
-            result_fused.total_governors, result_linear.total_governors
+            result_fused.total_governors,
+            result_linear.total_governors
         );
     }
 

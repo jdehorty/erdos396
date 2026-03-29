@@ -8,10 +8,9 @@
 //! Key difference from [`crate::search::parallel_search`]: this solver never
 //! computes per-element `is_governor[i]`. Instead it strips all prime factors
 //! into a `rem[]` array, scans for runs of `rem[j] <= 1`, and only calls
-//! [`exact_check`] on the rare candidates. This makes the hot path ~100x
+//! [`exact_check_detailed`] on the rare candidates. This makes the hot path ~100x
 //! faster than the fused-sieve approach.
 
-use crate::governor::vp_central_binom_dispatch;
 use crate::sieve::{build_prime_data, PrimeData, PrimeSieve};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
@@ -207,103 +206,6 @@ fn exact_check_detailed(
     let nk1 = n - k - 1;
     for pd in prime_data {
         let p = pd.p as u64;
-        if p == 2 { continue; }
-        if p > two_k { break; }
-        let (mut nu_prod, mut nu_comb, mut pw) = (0u64, 0u64, p);
-        loop {
-            let vn = n / pw;
-            nu_prod += vn - nk1 / pw;
-            nu_comb += two_n / pw - (vn << 1);
-            if pw > two_n / p { break; }
-            pw *= p;
-        }
-        if nu_prod > nu_comb {
-            return Err(FalsePositiveDetail {
-                failing_prime: p,
-                demand: nu_prod,
-                supply: nu_comb,
-                part: 2,
-            });
-        }
-    }
-
-    // Part 3: Per-element large prime check
-    for i in 0..=k {
-        let ni = n - i;
-        let mut temp = ni;
-        temp >>= temp.trailing_zeros();
-
-        for pd in prime_data {
-            let p = pd.p as u64;
-            if p == 2 { continue; }
-
-            if p <= two_k {
-                let mut q = temp.wrapping_mul(pd.inv_p);
-                while q <= pd.max_quot { temp = q; q = temp.wrapping_mul(pd.inv_p); }
-                continue;
-            }
-
-            if p * p > temp {
-                if temp > two_k {
-                    let p_val = temp;
-                    let mut nu_prod = 1u64;
-                    let mut t2 = ni / p_val;
-                    while t2 > 0 && t2 % p_val == 0 { nu_prod += 1; t2 /= p_val; }
-                    let mut nu_comb = 0u64;
-                    let mut power = p_val;
-                    loop {
-                        nu_comb += two_n / power - 2 * (n / power);
-                        if power > two_n / p_val { break; }
-                        power *= p_val;
-                    }
-                    if nu_prod > nu_comb {
-                        return Err(FalsePositiveDetail {
-                            failing_prime: p_val, demand: nu_prod, supply: nu_comb, part: 3,
-                        });
-                    }
-                }
-                break;
-            }
-
-            let q = temp.wrapping_mul(pd.inv_p);
-            if q <= pd.max_quot {
-                let mut nu_prod = 0u64;
-                let mut q2 = q;
-                loop { nu_prod += 1; temp = q2; q2 = temp.wrapping_mul(pd.inv_p); if q2 > pd.max_quot { break; } }
-                let mut nu_comb = 0u64;
-                let mut power = p;
-                loop { nu_comb += two_n / power - 2 * (n / power); if power > two_n / p { break; } power *= p; }
-                if nu_prod > nu_comb {
-                    return Err(FalsePositiveDetail {
-                        failing_prime: p, demand: nu_prod, supply: nu_comb, part: 3,
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[cold]
-#[inline(never)]
-fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
-    let two_k = 2 * k;
-    let two_n = 2 * n;
-
-    // Part 1: v_2 check (popcount-based Kummer's theorem for p=2)
-    let n_ones = n.count_ones() as u64;
-    let nu2_prod = ((n - k - 1).count_ones() as u64)
-        .wrapping_sub(n_ones)
-        .wrapping_add(k + 1);
-    if n_ones < nu2_prod {
-        return false;
-    }
-
-    // Part 2: Legendre formula for primes p in (2, 2k]
-    let nk1 = n - k - 1;
-    for pd in prime_data {
-        let p = pd.p as u64;
         if p == 2 {
             continue;
         }
@@ -321,7 +223,12 @@ fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
             pw *= p;
         }
         if nu_prod > nu_comb {
-            return false;
+            return Err(FalsePositiveDetail {
+                failing_prime: p,
+                demand: nu_prod,
+                supply: nu_comb,
+                part: 2,
+            });
         }
     }
 
@@ -355,19 +262,22 @@ fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
                         nu_prod += 1;
                         t2 /= p_val;
                     }
-
                     let mut nu_comb = 0u64;
                     let mut power = p_val;
                     loop {
-                        let v_n = n / power;
-                        nu_comb += two_n / power - 2 * v_n;
+                        nu_comb += two_n / power - 2 * (n / power);
                         if power > two_n / p_val {
                             break;
                         }
                         power *= p_val;
                     }
                     if nu_prod > nu_comb {
-                        return false;
+                        return Err(FalsePositiveDetail {
+                            failing_prime: p_val,
+                            demand: nu_prod,
+                            supply: nu_comb,
+                            part: 3,
+                        });
                     }
                 }
                 break;
@@ -385,25 +295,28 @@ fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
                         break;
                     }
                 }
-
                 let mut nu_comb = 0u64;
                 let mut power = p;
                 loop {
-                    let v_n = n / power;
-                    nu_comb += two_n / power - 2 * v_n;
+                    nu_comb += two_n / power - 2 * (n / power);
                     if power > two_n / p {
                         break;
                     }
                     power *= p;
                 }
                 if nu_prod > nu_comb {
-                    return false;
+                    return Err(FalsePositiveDetail {
+                        failing_prime: p,
+                        demand: nu_prod,
+                        supply: nu_comb,
+                        part: 3,
+                    });
                 }
             }
         }
     }
 
-    true
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -436,10 +349,14 @@ pub trait SolverHooks: Send + Sync {
 
     /// Whether to track all runs (adds a per-chunk linear scan, ~20% overhead).
     /// Returns false by default (bench mode). Override to true for normal mode.
-    fn track_runs(&self) -> bool { false }
+    fn track_runs(&self) -> bool {
+        false
+    }
 
     /// Minimum run length to report via [`on_run`](SolverHooks::on_run).
-    fn min_run_length(&self) -> usize { 2 }
+    fn min_run_length(&self) -> usize {
+        2
+    }
 }
 
 /// No-op hooks — zero overhead after monomorphization. Used for bench mode.
@@ -483,6 +400,7 @@ pub struct SolveResult {
 /// - `bench_secs`: if > 0, stop after this many seconds (bench mode)
 /// - `progress`: if true, emit progress lines to stderr
 /// - `hooks`: callback receiver for recording/checkpointing
+#[allow(clippy::too_many_arguments)]
 pub fn solve<H: SolverHooks>(
     k: u64,
     start_l: u64,
@@ -522,7 +440,11 @@ pub fn solve<H: SolverHooks>(
                     let cumulative_mcps = total_candidates as f64 / elapsed / 1e6;
                     eprintln!(
                         "P\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.4}",
-                        k, mcps, cumulative_mcps, total_candidates as f64 / 1e9, elapsed
+                        k,
+                        mcps,
+                        cumulative_mcps,
+                        total_candidates as f64 / 1e9,
+                        elapsed
                     );
                     last_chunks = chunks_now;
 
@@ -591,17 +513,16 @@ pub fn solve<H: SolverHooks>(
                         prime_offsets.resize(chunk_total_primes, 0);
                     }
 
-                    let first_large_prime_idx = prime_data[..chunk_total_primes]
-                        .partition_point(|pd| pd.p <= BLOCK_SIZE);
+                    let first_large_prime_idx =
+                        prime_data[..chunk_total_primes].partition_point(|pd| pd.p <= BLOCK_SIZE);
 
                     // Compute initial offsets via Barrett reduction
                     for idx in 1..chunk_total_primes {
                         let pd = &prime_data[idx];
                         let p = pd.p as u64;
                         let num = l_chunk + p - 1;
-                        let start_c =
-                            (((num as u128).wrapping_mul(pd.magic as u128)) >> 64) as u64
-                                >> pd.shift as u64;
+                        let start_c = (((num as u128).wrapping_mul(pd.magic as u128)) >> 64) as u64
+                            >> pd.shift as u64;
                         prime_offsets[idx] = (start_c * p - l_chunk) as u32;
                     }
 
@@ -726,12 +647,16 @@ pub fn solve<H: SolverHooks>(
                             }
 
                             if i < 0 {
-                                let cand_n =
-                                    block_l - overlap as u64 + scan_j as u64 + k;
+                                let cand_n = block_l - overlap as u64 + scan_j as u64 + k;
                                 if cand_n > k {
-                                    let dominated = !bench_mode && cand_n >= global_min_n.load(Relaxed);
+                                    let dominated =
+                                        !bench_mode && cand_n >= global_min_n.load(Relaxed);
                                     if !dominated {
-                                        match exact_check_detailed(cand_n, k, &prime_data[..chunk_total_primes]) {
+                                        match exact_check_detailed(
+                                            cand_n,
+                                            k,
+                                            &prime_data[..chunk_total_primes],
+                                        ) {
                                             Ok(()) => {
                                                 witness_count.fetch_add(1, Relaxed);
                                                 hooks.on_witness(worker_id, cand_n, k);
@@ -746,7 +671,9 @@ pub fn solve<H: SolverHooks>(
                                                 }
                                             }
                                             Err(detail) => {
-                                                hooks.on_false_positive(worker_id, cand_n, k, &detail);
+                                                hooks.on_false_positive(
+                                                    worker_id, cand_n, k, &detail,
+                                                );
                                             }
                                         }
                                     }
@@ -762,9 +689,8 @@ pub fn solve<H: SolverHooks>(
                             for j in 0..num_new as usize {
                                 let chunk_pos = block_start as usize + j;
                                 if chunk_pos < effective_chunk as usize {
-                                    smooth[chunk_pos] = unsafe {
-                                        *rem.as_ptr().add(overlap as usize + j)
-                                    } <= 1;
+                                    smooth[chunk_pos] =
+                                        unsafe { *rem.as_ptr().add(overlap as usize + j) } <= 1;
                                 }
                             }
                         }
@@ -790,8 +716,10 @@ pub fn solve<H: SolverHooks>(
                         let min_run = hooks.min_run_length();
                         let mut run_start = 0u64;
                         let mut run_len = 0usize;
-                        for i in 0..effective_chunk as usize {
-                            if smooth[i] {
+                        for (i, &is_smooth) in
+                            smooth.iter().enumerate().take(effective_chunk as usize)
+                        {
+                            if is_smooth {
                                 if run_len == 0 {
                                     run_start = l_chunk + i as u64;
                                 }

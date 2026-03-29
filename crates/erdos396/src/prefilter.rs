@@ -14,7 +14,6 @@
 //!    of each prime (amortized), while trial division tests every prime
 //!    against every number.
 
-use crate::governor::vp_central_binom_dispatch;
 use crate::int_math::isqrt_u128;
 use crate::sieve::{build_prime_data, PrimeData};
 
@@ -116,131 +115,6 @@ macro_rules! dispatch_strip {
 }
 
 // ---------------------------------------------------------------------------
-// Unconditional strip — Phase 1 hot path (no divisibility check, no exp)
-//
-// At every visited position, p is KNOWN to divide remaining (because we only
-// visit multiples of p, and all previously-stripped primes are coprime to p).
-// This lets us skip the divisibility check and do the first division
-// unconditionally, matching search-lab's inner loop.
-// ---------------------------------------------------------------------------
-
-/// Unconditional strip for compile-time-constant prime P.
-/// First division is always valid; strips additional factors of P.
-#[inline(always)]
-fn strip_unconditional_const<const P: u64>(remaining: &mut u64) {
-    const fn inv_const(p: u64) -> u64 {
-        let mut inv = p.wrapping_mul(3) ^ 2;
-        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
-        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
-        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
-        inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
-        inv
-    }
-    const fn limit_const(p: u64) -> u64 {
-        u64::MAX / p
-    }
-
-    let inv = inv_const(P);
-    let limit = limit_const(P);
-
-    let mut temp = remaining.wrapping_mul(inv); // first division (unconditional)
-    loop {
-        let q = temp.wrapping_mul(inv);
-        if q > limit {
-            break;
-        }
-        temp = q;
-    }
-    *remaining = temp;
-}
-
-/// Unconditional strip for runtime prime using precomputed inverse.
-#[inline(always)]
-fn strip_unconditional_dyn(remaining: &mut u64, inv_p: u64, max_quot: u64) {
-    let mut temp = remaining.wrapping_mul(inv_p); // first division (unconditional)
-    loop {
-        let q = temp.wrapping_mul(inv_p);
-        if q > max_quot {
-            break;
-        }
-        temp = q;
-    }
-    *remaining = temp;
-}
-
-macro_rules! dispatch_strip_unconditional {
-    ($remaining:expr, $pd:expr, [$($prime:literal),* $(,)?]) => {
-        match $pd.p as u64 {
-            $($prime => strip_unconditional_const::<$prime>($remaining),)*
-            _ => strip_unconditional_dyn($remaining, $pd.inv_p, $pd.max_quot),
-        }
-    };
-}
-
-// ---------------------------------------------------------------------------
-// Phase 2 cold-path: governor verification for smooth numbers
-// ---------------------------------------------------------------------------
-
-/// Verify governor membership for a smooth number by re-factorizing and
-/// checking v_p(C(2n,n)) >= v_p(n) for each prime factor.
-///
-/// Called only for numbers that pass Phase 1 (remaining == 1 after sieve).
-/// This is the cold path — called for ~30% of numbers.
-#[cold]
-#[inline(never)]
-fn check_governor_smooth(n: u64, prime_data: &[PrimeData], total_primes: usize) -> bool {
-    // v_2 check: v_2(C(2n,n)) = popcount(n), v_2(n) = trailing_zeros(n)
-    let tz = n.trailing_zeros();
-    if (n.count_ones() as u32) < tz {
-        return false;
-    }
-
-    let mut remaining = n >> tz;
-
-    for pd in &prime_data[..total_primes] {
-        let p = pd.p as u64;
-        if p == 2 {
-            continue;
-        }
-        if p * p > remaining {
-            break;
-        }
-
-        let q = remaining.wrapping_mul(pd.inv_p);
-        if q <= pd.max_quot {
-            // p divides remaining — count exponent and check v_p
-            let mut exp = 1u32;
-            remaining = q;
-            loop {
-                let q2 = remaining.wrapping_mul(pd.inv_p);
-                if q2 > pd.max_quot {
-                    break;
-                }
-                remaining = q2;
-                exp += 1;
-            }
-            let supply = vp_central_binom_dispatch(n, p);
-            if (exp as u64) > supply {
-                return false;
-            }
-            if remaining == 1 {
-                return true;
-            }
-        }
-    }
-
-    // Any remaining factor > sqrt(n) is a single prime
-    if remaining > 1 {
-        let supply = vp_central_binom_dispatch(n, remaining);
-        if 1 > supply {
-            return false;
-        }
-    }
-
-    true
-}
-
-// ---------------------------------------------------------------------------
 // Bucketed large-prime processing
 // ---------------------------------------------------------------------------
 
@@ -272,14 +146,14 @@ impl FusedBatchResult {
     ///
     /// Two-phase architecture matching search-lab's performance:
     ///
-    /// **Phase 1 (hot):** Pure sieve — strip all prime factors unconditionally
-    /// using modular-inverse arithmetic. No v_p check, no is_governor tracking.
-    /// At each visited position, p is KNOWN to divide remaining (we only visit
-    /// multiples of p, and all previously-stripped primes are coprime).
+    /// **Phase 1 (hot):** Sieve — strip prime factors using modular-inverse
+    /// arithmetic, skipping indices that already failed the v_2 pre-check.
+    /// Small primes use divisibility-based strip; large primes use bucketed
+    /// visits per cache block.
     ///
-    /// **Phase 2 (cold):** Classify results — numbers with remaining > 1 have a
-    /// large prime factor (rejected). Numbers with remaining == 1 are smooth;
-    /// verify governor membership via re-factorization + v_p check.
+    /// **Phase 2 (cold):** Classify — `remaining > 1` implies a large prime
+    /// factor (rejected). Smooth indices get a cheap v_2 check only; exact
+    /// governor verification happens later in the search loop.
     ///
     /// `prime_data` must contain all primes up to at least √(2·(lo+len)).
     pub fn compute(lo: u64, len: usize, prime_data: &[PrimeData]) -> Self {
@@ -325,16 +199,16 @@ impl FusedBatchResult {
             }
             let tz = n.trailing_zeros();
             remaining[i] = n >> tz;
-            if (n.count_ones() as u32) < tz {
+            if n.count_ones() < tz {
                 rejected[i] = true;
             }
         }
 
         // Compute initial offsets for all odd primes (Barrett reduction)
-        let mut prime_offsets = vec![0u32; total_primes];
+        let mut prime_offsets = vec![0u64; total_primes];
         for idx in first_odd..total_primes {
             let pd = &prime_data[idx];
-            let p = pd.p as u64;
+            let p = pd.p;
             let first_multiple = if lo == 0 {
                 p
             } else {
@@ -342,14 +216,18 @@ impl FusedBatchResult {
                 let start_c = (((num as u128).wrapping_mul(pd.magic as u128)) >> 64) as u64
                     >> pd.shift as u64;
                 let fm = start_c * p;
-                if fm < lo { fm + p } else { fm }
+                if fm < lo {
+                    fm + p
+                } else {
+                    fm
+                }
             };
-            prime_offsets[idx] = (first_multiple - lo) as u32;
+            prime_offsets[idx] = first_multiple - lo;
         }
 
         // Block-tiled sieve with bucketed large primes
         let first_large =
-            prime_data[..total_primes].partition_point(|pd| (pd.p as usize) <= BLOCK_SIZE);
+            prime_data[..total_primes].partition_point(|pd| pd.p <= BLOCK_SIZE as u64);
 
         // Pre-bucket large primes by target block index
         let num_blocks = len.div_ceil(BLOCK_SIZE);
@@ -468,7 +346,7 @@ impl FusedBatchResult {
             // Smooth (remaining == 1): cheap v_2 check only
             // v_2(C(2n,n)) = popcount(n), v_2(n) = trailing_zeros(n)
             let tz = n.trailing_zeros();
-            if (n.count_ones() as u32) >= tz {
+            if n.count_ones() >= tz {
                 is_governor[i] = true;
                 governor_count += 1;
             } else {
@@ -754,9 +632,9 @@ mod tests {
     fn test_fused_no_false_negatives_witness_regions() {
         // Test around known witness positions — these MUST not have false negatives
         for &(lo, len) in &[
-            (339_949_240u64, 20),        // k=8 witness
-            (1_019_547_840, 20),         // k=9 witness
-            (24_999_999_999_900, 20),    // 25T scale
+            (339_949_240u64, 20),     // k=8 witness
+            (1_019_547_840, 20),      // k=9 witness
+            (24_999_999_999_900, 20), // 25T scale
         ] {
             let hi = lo + len as u64;
             let max_n: u128 = (lo as u128) + (len as u128) - 1;
@@ -799,7 +677,9 @@ mod tests {
         assert!(
             fp_rate < 25.0,
             "False positive rate too high: {:.1}% ({} false positives out of {})",
-            fp_rate, false_positives, len
+            fp_rate,
+            false_positives,
+            len
         );
     }
 

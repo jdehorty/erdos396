@@ -11,8 +11,8 @@ use erdos396::{
     BuildInfo, KNOWN_RUNS_OF_9, KNOWN_WITNESSES,
 };
 use serde::Serialize;
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -101,14 +101,20 @@ impl SolverHooks for RecordingHooks {
     fn on_false_positive(&self, _worker_id: u32, n: u64, _k: u64, detail: &FalsePositiveDetail) {
         log::debug!(
             "False positive at n={}: p={} demand={} supply={}",
-            n, detail.failing_prime, detail.demand, detail.supply
-        );
-        self.false_positive_details.lock().unwrap().push(FalsePositiveRecord {
             n,
-            failing_prime: detail.failing_prime,
-            demand: detail.demand,
-            supply: detail.supply,
-        });
+            detail.failing_prime,
+            detail.demand,
+            detail.supply
+        );
+        self.false_positive_details
+            .lock()
+            .unwrap()
+            .push(FalsePositiveRecord {
+                n,
+                failing_prime: detail.failing_prime,
+                demand: detail.demand,
+                supply: detail.supply,
+            });
     }
 
     fn on_chunk_done(&self, worker_id: u32, chunk_start: u64, chunk_end: u64) {
@@ -672,8 +678,9 @@ fn main() -> anyhow::Result<()> {
     let actual_sum = *hooks.sum_checked.lock().unwrap();
     let actual_xor = hooks.xor_checked.load(Ordering::Relaxed);
 
-    let coverage_ok =
-        total_checked == expected_checked && actual_sum == expected_sum && actual_xor == expected_xor;
+    let coverage_ok = total_checked == expected_checked
+        && actual_sum == expected_sum
+        && actual_xor == expected_xor;
 
     println!();
     println!("======================================================================");
@@ -691,7 +698,10 @@ fn main() -> anyhow::Result<()> {
     println!("  Throughput: {:.1} M/s", speed);
     println!();
     println!("  Total checked: {}", total_checked);
-    println!("  Coverage: {}", if coverage_ok { "VERIFIED" } else { "MISMATCH" });
+    println!(
+        "  Coverage: {}",
+        if coverage_ok { "VERIFIED" } else { "MISMATCH" }
+    );
     if !coverage_ok {
         eprintln!(
             "  WARNING: coverage mismatch — checked={} (expected {}), sum={} (expected {}), xor={} (expected {})",
