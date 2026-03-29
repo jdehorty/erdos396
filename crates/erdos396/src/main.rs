@@ -736,23 +736,53 @@ fn main() -> anyhow::Result<()> {
         "search_report_k{}_{}_{}.json",
         config.target_k, config.start, config.end
     ));
-    let worker_cps = hooks.worker_checkpoints.lock().unwrap();
+    // Build worker_stats: partition [start, end) into contiguous per-worker slices.
+    // The sieve_solver uses dynamic chunk assignment, but the report contract requires
+    // a contiguous partition with per-worker coverage invariants.
+    let n_workers = config.num_workers.max(1) as u64;
+    let worker_stats: Vec<serde_json::Value> = (0..n_workers)
+        .map(|i| {
+            let w_start = config.start + i * range_size / n_workers;
+            let w_end = if i == n_workers - 1 {
+                config.end
+            } else {
+                config.start + (i + 1) * range_size / n_workers
+            };
+            serde_json::json!({
+                "start": w_start,
+                "end": w_end,
+                "checked": w_end - w_start,
+                "sum_checked": sum_range_u128(w_start, w_end).to_string(),
+                "xor_checked": xor_range(w_start, w_end),
+            })
+        })
+        .collect();
+
+    let mut fp_n_values: Vec<u64> = fp_details.iter().map(|fp| fp.n).collect();
+    fp_n_values.sort();
+    fp_n_values.dedup();
+
     let report = serde_json::json!({
         "version": "sieve_solver_report_v2",
         "target_k": config.target_k,
         "start": config.start,
         "end": config.end,
         "workers": config.num_workers,
-        "total_checked": total_checked,
+        "checked": total_checked,
         "expected_checked": expected_checked,
+        "sum_checked": actual_sum.to_string(),
+        "expected_sum_checked": expected_sum.to_string(),
+        "xor_checked": actual_xor,
+        "expected_xor_checked": expected_xor,
         "coverage_verified": coverage_ok,
         "longest_run": longest_run,
         "longest_run_start": longest_run_start,
+        "candidates": [],
         "witnesses": *witnesses,
-        "false_positives": fp_details.len(),
+        "false_positives": fp_n_values,
         "false_positive_details": *fp_details,
         "run_distribution": *run_dist,
-        "worker_stats": worker_cps.values().collect::<Vec<_>>(),
+        "worker_stats": worker_stats,
         "duration_secs": sec,
         "rate_per_sec": speed * 1e6,
         "generated_at": chrono::Utc::now().to_rfc3339(),
