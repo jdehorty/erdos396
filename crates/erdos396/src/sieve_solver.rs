@@ -287,6 +287,33 @@ fn exact_check(n: u64, k: u64, prime_data: &[PrimeData]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Hooks trait — separates engine from recording scaffolding
+// ---------------------------------------------------------------------------
+
+/// Callbacks emitted by the solver at strategic points.
+///
+/// Implementations can record checkpoints, log runs, track statistics, etc.
+/// With monomorphization, [`NoOpHooks`] compiles to zero overhead.
+///
+/// All methods have no-op defaults so implementors only override what they need.
+/// Methods are called from worker threads and must be `Send + Sync`.
+pub trait SolverHooks: Send + Sync {
+    /// A verified witness was found: `n(n-1)...(n-k) | C(2n,n)`.
+    fn on_witness(&self, _n: u64, _k: u64) {}
+
+    /// A candidate (smooth run of k+1) was checked but failed exact verification.
+    fn on_false_positive(&self, _n: u64, _k: u64) {}
+
+    /// A worker finished processing a chunk covering `[chunk_start, chunk_end)`.
+    /// Called once per chunk per worker. Useful for checkpointing and progress.
+    fn on_chunk_done(&self, _chunk_start: u64, _chunk_end: u64) {}
+}
+
+/// No-op hooks — zero overhead after monomorphization. Used for bench mode.
+pub struct NoOpHooks;
+impl SolverHooks for NoOpHooks {}
+
+// ---------------------------------------------------------------------------
 // Result type
 // ---------------------------------------------------------------------------
 
@@ -312,13 +339,18 @@ pub struct SolveResult {
 /// the same bucketed-sieve + sliding-window architecture for maximum
 /// throughput.
 ///
+/// The `hooks` parameter receives callbacks at strategic points (witness
+/// found, chunk done, false positive). With [`NoOpHooks`], all callbacks
+/// are eliminated at compile time via monomorphization.
+///
 /// - `k`: target k (searches for runs of k+1 consecutive governors)
 /// - `start_l`, `end_l`: search range
 /// - `prime_data`: precomputed prime data (from [`build_prime_data`])
 /// - `n_threads`: number of worker threads
 /// - `bench_secs`: if > 0, stop after this many seconds (bench mode)
 /// - `progress`: if true, emit progress lines to stderr
-pub fn solve(
+/// - `hooks`: callback receiver for recording/checkpointing
+pub fn solve<H: SolverHooks>(
     k: u64,
     start_l: u64,
     end_l: u64,
@@ -326,6 +358,7 @@ pub fn solve(
     n_threads: u32,
     bench_secs: f64,
     progress: bool,
+    hooks: &H,
 ) -> SolveResult {
     let k32 = k as u32;
     let two_k = 2 * k;
@@ -548,15 +581,11 @@ pub fn solve(
                             if i < 0 {
                                 let cand_n =
                                     block_l - overlap as u64 + scan_j as u64 + k;
-                                if bench_mode {
-                                    if cand_n > k
-                                        && exact_check(
-                                            cand_n,
-                                            k,
-                                            &prime_data[..chunk_total_primes],
-                                        )
-                                    {
+                                if cand_n > k {
+                                    let dominated = !bench_mode && cand_n >= global_min_n.load(Relaxed);
+                                    if !dominated && exact_check(cand_n, k, &prime_data[..chunk_total_primes]) {
                                         witness_count.fetch_add(1, Relaxed);
+                                        hooks.on_witness(cand_n, k);
                                         let mut current = global_min_n.load(Relaxed);
                                         while cand_n < current {
                                             match global_min_n.compare_exchange_weak(
@@ -566,24 +595,8 @@ pub fn solve(
                                                 Err(c) => current = c,
                                             }
                                         }
-                                    }
-                                } else if cand_n > k
-                                    && cand_n < global_min_n.load(Relaxed)
-                                    && exact_check(
-                                        cand_n,
-                                        k,
-                                        &prime_data[..chunk_total_primes],
-                                    )
-                                {
-                                    witness_count.fetch_add(1, Relaxed);
-                                    let mut current = global_min_n.load(Relaxed);
-                                    while cand_n < current {
-                                        match global_min_n.compare_exchange_weak(
-                                            current, cand_n, Relaxed, Relaxed,
-                                        ) {
-                                            Ok(_) => break,
-                                            Err(c) => current = c,
-                                        }
+                                    } else if !dominated {
+                                        hooks.on_false_positive(cand_n, k);
                                     }
                                 }
                                 scan_j += 1;
@@ -607,6 +620,9 @@ pub fn solve(
 
                         block_start += BLOCK_SIZE;
                     }
+
+                    // Notify hooks that this chunk is done
+                    hooks.on_chunk_done(l_chunk, l_chunk + effective_chunk);
                 }
             });
         }

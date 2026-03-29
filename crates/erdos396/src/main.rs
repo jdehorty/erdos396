@@ -6,12 +6,59 @@
 use clap::Parser;
 use erdos396::{
     search::{parallel_search, print_results, SearchConfig},
+    sieve_solver::{NoOpHooks, SolverHooks},
     verify::verify_known_witnesses,
     BuildInfo, KNOWN_RUNS_OF_9, KNOWN_WITNESSES,
 };
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// Recording hooks for normal search mode — tracks witnesses, false positives,
+/// and chunk progress for checkpointing.
+struct RecordingHooks {
+    witnesses: Mutex<Vec<u64>>,
+    false_positives: AtomicU64,
+    chunks_done: AtomicU64,
+    output_dir: PathBuf,
+    k: u64,
+}
+
+impl RecordingHooks {
+    fn new(output_dir: PathBuf, k: u64) -> Self {
+        Self {
+            witnesses: Mutex::new(Vec::new()),
+            false_positives: AtomicU64::new(0),
+            chunks_done: AtomicU64::new(0),
+            output_dir,
+            k,
+        }
+    }
+}
+
+impl SolverHooks for RecordingHooks {
+    fn on_witness(&self, n: u64, _k: u64) {
+        log::error!("*** VERIFIED WITNESS FOUND: k={}, n={} ***", self.k, n);
+        self.witnesses.lock().unwrap().push(n);
+    }
+
+    fn on_false_positive(&self, n: u64, _k: u64) {
+        log::debug!("False positive candidate at n={}", n);
+        self.false_positives.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_chunk_done(&self, chunk_start: u64, chunk_end: u64) {
+        let count = self.chunks_done.fetch_add(1, Ordering::Relaxed) + 1;
+        // Periodic checkpoint: write progress every 1000 chunks
+        if count % 1000 == 0 {
+            let _ = std::fs::create_dir_all(&self.output_dir);
+            let cp_path = self.output_dir.join(format!("checkpoint_k{}.txt", self.k));
+            let _ = std::fs::write(&cp_path, format!("{} {}\n", chunk_end, count));
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "erdos396")]
@@ -440,50 +487,72 @@ fn main() -> anyhow::Result<()> {
         t0.elapsed().as_secs_f64()
     );
 
+    if bench_mode {
+        // Bench mode: NoOpHooks for zero overhead
+        let result = erdos396::sieve_solver::solve(
+            config.target_k as u64,
+            config.start,
+            config.end,
+            &prime_data,
+            config.num_workers as u32,
+            config.bench_secs,
+            false,
+            &NoOpHooks,
+        );
+
+        let sec = result.duration.as_secs_f64();
+        let checked = result.chunks_processed * 1_048_576;
+        let speed = checked as f64 / sec / 1e6;
+        println!(
+            "R\t{}\tbench\t{:.4}\t{}\t{:.2}\t{}",
+            config.target_k, sec, checked, speed, result.witness_count
+        );
+        std::process::exit(0);
+    }
+
+    // Normal mode: RecordingHooks for checkpointing and witness tracking
+    let hooks = RecordingHooks::new(config.output_dir.clone(), config.target_k as u64);
     let result = erdos396::sieve_solver::solve(
         config.target_k as u64,
         config.start,
         config.end,
         &prime_data,
         config.num_workers as u32,
-        config.bench_secs,
-        !bench_mode, // progress reporting for normal mode
+        0.0,
+        true, // progress
+        &hooks,
     );
 
     let sec = result.duration.as_secs_f64();
-    let candidates = if config.end < u64::MAX {
-        config.end - config.start
-    } else {
-        result.chunks_processed * 1_048_576
-    };
+    let candidates = config.end - config.start;
     let speed = candidates as f64 / sec / 1e6;
+    let witnesses = hooks.witnesses.lock().unwrap();
+    let false_positives = hooks.false_positives.load(Ordering::Relaxed);
 
-    if bench_mode {
-        // Universal Benchmark Contract: R-line to stdout
-        let checked = result.chunks_processed * 1_048_576;
-        println!(
-            "R\t{}\tbench\t{:.4}\t{}\t{:.2}\t{}",
-            config.target_k, sec, checked, speed, result.witness_count
-        );
-    } else {
-        // Normal mode: human-readable output
-        println!();
-        println!("======================================================================");
-        println!("Search Complete (sieve_solver)");
-        println!("======================================================================");
-        println!("  Target k: {}", config.target_k);
-        println!("  Range: [{}, {})", config.start, config.end);
-        println!("  Workers: {}", config.num_workers);
-        println!("  Duration: {:.3}s", sec);
-        println!("  Throughput: {:.1} M/s", speed);
-        println!("  Witnesses found: {}", result.witness_count);
-        if result.min_witness < u64::MAX {
-            println!("  Minimum witness: n={}", result.min_witness);
-        }
-        println!("======================================================================");
+    println!();
+    println!("======================================================================");
+    println!("Search Complete");
+    println!("======================================================================");
+    println!("  Target k: {}", config.target_k);
+    println!("  Range: [{}, {})", config.start, config.end);
+    println!("  Workers: {}", config.num_workers);
+    println!("  Duration: {:.3}s", sec);
+    println!("  Throughput: {:.1} M/s", speed);
+    println!("  Witnesses found: {}", witnesses.len());
+    println!("  False positives: {}", false_positives);
+    if result.min_witness < u64::MAX {
+        println!("  Minimum witness: n={}", result.min_witness);
     }
+    if !witnesses.is_empty() {
+        println!();
+        println!("*** WITNESSES ***");
+        for &w in witnesses.iter() {
+            println!("  k={}, n={}", config.target_k, w);
+        }
+    }
+    println!("======================================================================");
 
-    if result.witness_count > 0 {
+    if !witnesses.is_empty() {
         std::process::exit(0);
     } else {
         std::process::exit(1);
