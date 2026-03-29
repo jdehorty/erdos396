@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Parse C++ reference benchmark output into markdown table rows.
 
-Computes throughput from the binary's self-reported elapsed time and the known
-range. For capped runs (k=11, k=13) the binary's reported speed is based on
-witness distance, which is wrong when no witness is found.
+Computes throughput from elapsed time and known range (handles both
+witness-found and capped-range cases).
 """
 import re, sys
 
@@ -14,7 +13,9 @@ RANGES = {
     13: (18185829921842,   18253129921842),
 }
 
-# C++ output: k =  9 | min n =  1019547844 | Time:  0.2040 s | Speed:  3330.88 M candidates/s
+# C++ output format:
+# k =  9 | min n =      1019547844 | Time:       0.2040 s | Speed:  3330.88 M candidates/s
+# k = 11 | min n =            none | Time:      19.1234 s | Speed:  2614.12 M candidates/s
 for line in open(sys.argv[1]):
     m = re.match(r'k\s*=\s*(\d+)\s*\|.*Time:\s*([\d.]+)\s*s', line)
     if m:

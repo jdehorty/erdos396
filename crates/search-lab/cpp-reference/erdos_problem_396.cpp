@@ -259,7 +259,7 @@ inline void process_p_dyn(uint32_t p, uint64_t inv_p, uint64_t limit, uint32_t& 
     start_j = j - W_block;
 }
 
-uint64_t solve(uint64_t k, uint64_t start_L)
+uint64_t solve(uint64_t k, uint64_t start_L, uint64_t end_L = UINT64_MAX)
 {
     const uint64_t CHUNK_SIZE = 1048576;
     std::atomic<uint64_t> current_chunk{0};
@@ -282,6 +282,8 @@ uint64_t solve(uint64_t k, uint64_t start_L)
             uint64_t R_chunk = L_chunk + CHUNK_SIZE + k - 1;
 
             if (L_chunk > global_min_n.load(std::memory_order_relaxed))
+                break;
+            if (L_chunk >= end_L)
                 break;
 
             uint32_t CHUNK_W = (uint32_t)(R_chunk - L_chunk + 1);
@@ -466,9 +468,57 @@ uint64_t solve(uint64_t k, uint64_t start_L)
     return global_min_n.load();
 }
 
-int main()
+int main(int argc, char** argv)
 {
-    std::cout << "Detected " << NUM_THREADS << " logical cores. Using C++ Thread Pool...\n";
+    uint64_t start_k = 0, start_L = 0, end_L = UINT64_MAX, k_max = 20;
+
+    // Parse CLI args: -k K, --start N, --end N, --kmax K
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string a = argv[i];
+        if ((a == "-k" || a == "--k") && i + 1 < argc)
+            start_k = std::stoull(argv[++i]);
+        else if (a == "--start" && i + 1 < argc)
+            start_L = std::stoull(argv[++i]);
+        else if (a == "--end" && i + 1 < argc)
+            end_L = std::stoull(argv[++i]);
+        else if (a == "--kmax" && i + 1 < argc)
+            k_max = std::stoull(argv[++i]);
+        else
+        {
+            std::cerr << "Usage: " << argv[0]
+                      << " [-k K] [--start N] [--end N] [--kmax K]\n";
+            return 1;
+        }
+    }
+
+    // Fall back to checkpoint if no CLI args given
+    if (start_k == 0)
+    {
+        start_k = 1;
+        start_L = 1;
+        if (std::filesystem::exists("checkpoint-396.txt"))
+        {
+            std::ifstream fin("checkpoint-396.txt");
+            if (!(fin >> start_k >> start_L))
+            {
+                start_k = 1;
+                start_L = 1;
+            }
+            else
+            {
+                std::cout << "--> Resuming from checkpoint: k = " << start_k
+                          << ", L_batch = " << start_L << "\n\n";
+            }
+        }
+    }
+
+    std::cout << "erdos396-ref | threads=" << NUM_THREADS
+              << " k=" << start_k << ".." << k_max
+              << " start=" << start_L
+              << " end=" << (end_L == UINT64_MAX ? "inf" : std::to_string(end_L))
+              << "\n";
+
     std::cout << "Generating primes up to 200,000,000...\n";
     auto start_primes = std::chrono::high_resolution_clock::now();
     get_primes(200000000);
@@ -476,38 +526,27 @@ int main()
     std::cout << "Primes generated in " << std::chrono::duration<double>(end_primes - start_primes).count()
               << " seconds.\n\n";
 
-    uint64_t start_k = 1;
-    uint64_t start_L = 1;
-
-    if (std::filesystem::exists("checkpoint-396.txt"))
-    {
-        std::ifstream fin("checkpoint-396.txt");
-        if (fin >> start_k >> start_L)
-        {
-            std::cout << "--> Resuming from checkpoint: k = " << start_k << ", L_batch = " << start_L << "\n\n";
-        }
-        else
-        {
-            start_k = 1;
-            start_L = 1;
-        }
-    }
-
-    for (uint64_t k = start_k; k <= 20; ++k)
+    for (uint64_t k = start_k; k <= k_max; ++k)
     {
         auto start = std::chrono::high_resolution_clock::now();
-        uint64_t ans = solve(k, start_L);
+        uint64_t ans = solve(k, start_L, end_L);
         auto end = std::chrono::high_resolution_clock::now();
 
         std::chrono::duration<double> elapsed = end - start;
         double seconds = elapsed.count();
 
-        uint64_t candidates_checked = (ans >= start_L) ? (ans - start_L + 1) : 1;
+        uint64_t candidates_checked;
+        if (ans < UINT64_MAX && ans >= start_L)
+            candidates_checked = ans - start_L + 1;
+        else if (end_L < UINT64_MAX)
+            candidates_checked = end_L - start_L;
+        else
+            candidates_checked = 1;
         double speed = candidates_checked / seconds;
 
         std::ostringstream oss;
         oss << "k = " << std::setw(2) << k
-            << " | min n = " << std::setw(15) << ans
+            << " | min n = " << std::setw(15) << (ans < UINT64_MAX ? std::to_string(ans) : "none")
             << " | Time: " << std::fixed << std::setprecision(4) << std::setw(12) << seconds << " s"
             << " | Speed: " << std::fixed << std::setprecision(2) << std::setw(8) << (speed / 1e6) << " M candidates/s\n";
 
@@ -517,7 +556,11 @@ int main()
         if (results_file)
             results_file << output_str;
 
-        start_L = ans;
+        if (ans < UINT64_MAX)
+            start_L = ans;
+        else
+            break; // no witness found in range, stop
+
         std::ofstream fout("checkpoint-396.tmp");
         if (fout)
         {

@@ -151,56 +151,23 @@ bench-cpp: build-cpp
         echo "|--:|:------|-----------:|---------:|-----------------:|"
     } | tee "$OUT"
 
-    # Phase 1: k=9,10 via natural chaining
-    rm -f cpp-reference/results-396.txt
-    echo "9 339949252" > cpp-reference/checkpoint-396.txt
+    BIN="cpp-reference/erdos396_ref"
+    TMPOUT=$(mktemp)
 
+    # Phase 1: k=9,10 continuous (finds both witnesses)
     echo "  Phase 1: k=9,10 full sweep..." >&2
-    cd cpp-reference
-    ./erdos396_ref > /dev/null 2>&1 &
-    PID=$!
-    while ! grep -q "^k = 10" results-396.txt 2>/dev/null; do sleep 0.2; done
-    kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true
-    cd ..
-    python3 parse_bench_cpp.py cpp-reference/results-396.txt >> "$OUT" 2>&2
+    "$BIN" -k 9 --kmax 10 --start 339949252 > "$TMPOUT" 2>/dev/null || true
 
-    # Phase 2: k=11 capped at 50B (seed at k=11, start=17609764994)
-    # The C++ binary has no --end, so we use timeout and parse partial results
-    rm -f cpp-reference/results-396.txt
-    echo "11 17609764994" > cpp-reference/checkpoint-396.txt
+    # Phase 2: k=11 capped at 50B candidates
+    echo "  Phase 2: k=11 [17.6B, 67.6B) (50B candidates)..." >&2
+    "$BIN" -k 11 --kmax 11 --start 17609764994 --end 67609764994 >> "$TMPOUT" 2>/dev/null || true
 
-    echo "  Phase 2: k=11 [17.6B, 67.6B) via timeout..." >&2
-    cd cpp-reference
-    # The C++ binary will search for k=11 witness at 1.07T. We need to time
-    # how long it takes to process 50B candidates and kill it. At ~2-3 G/s,
-    # 50B takes ~17-25s. Use timeout 35s as safety margin.
-    timeout 35 ./erdos396_ref > /dev/null 2>&1 || true
-    cd ..
-
-    # For k=11, the C++ binary won't have written a result line (didn't find witness).
-    # We use wall-clock timing instead.
-    if ! grep -q "^k = 11" cpp-reference/results-396.txt 2>/dev/null; then
-        # Compute from timeout: we know it processed ~50B candidates
-        # Parse whatever partial checkpoint data exists
-        echo "  (k=11: C++ binary timed out as expected, using wall-clock)" >&2
-        # We'll add a placeholder line — the C++ binary doesn't report partial results
-        # Skip k=11 for C++ if no result line exists
-    else
-        python3 parse_bench_cpp.py cpp-reference/results-396.txt >> "$OUT" 2>&2
-    fi
-
-    # Phase 3: k=13 with matching candidate count (~67.3B)
-    rm -f cpp-reference/results-396.txt
-    echo "13 18185829921842" > cpp-reference/checkpoint-396.txt
-
+    # Phase 3: k=13 with same total (~67.3B candidates)
     echo "  Phase 3: k=13 [18.186T, 18.253T) (67.3B candidates)..." >&2
-    cd cpp-reference
-    ./erdos396_ref > /dev/null 2>&1 &
-    PID=$!
-    while ! grep -q "^k = 13" results-396.txt 2>/dev/null; do sleep 0.5; done
-    kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true
-    cd ..
-    python3 parse_bench_cpp.py cpp-reference/results-396.txt >> "$OUT" 2>&2
+    "$BIN" -k 13 --kmax 13 --start 18185829921842 --end 18253129921842 >> "$TMPOUT" 2>/dev/null || true
+
+    python3 parse_bench_cpp.py "$TMPOUT" >> "$OUT" 2>&2
+    rm -f "$TMPOUT"
 
     echo "" | tee -a "$OUT"
     echo "Results written to: $OUT" >&2
