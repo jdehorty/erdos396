@@ -114,6 +114,13 @@ struct Cli {
     /// Verbose output
     #[arg(short = 'v', long)]
     verbose: bool,
+
+    /// Benchmark mode: process entire range, output R-line, no file I/O.
+    ///
+    /// SECS is a safety timeout; the --end bound normally terminates first.
+    /// Output follows the Universal Benchmark Contract (same as search-lab).
+    #[arg(long, value_name = "SECS")]
+    bench: Option<f64>,
 }
 
 /// Sum of integers in `[a, b)` computed in `u128` (exact for all `u64` inputs).
@@ -378,9 +385,20 @@ fn main() -> anyhow::Result<()> {
         safety_net: cli.safety_net,
         fused_self_check_samples: cli.fused_self_check_samples,
         fused_audit_interval: cli.fused_audit_interval,
-        bench_secs: 0.0,
+        bench_secs: cli.bench.unwrap_or(0.0),
     };
 
+    let bench_mode = config.bench_secs > 0.0;
+
+    if bench_mode {
+        // Bench mode: header info to stderr
+        eprintln!(
+            "# erdos396 bench  k={}  range=[{}, {})  workers={}",
+            config.target_k, config.start, config.end, config.num_workers
+        );
+    }
+
+    if !bench_mode {
     // Print configuration
     println!("Erdős 396 Search Configuration:");
     println!("  Target k: {}", config.target_k);
@@ -437,11 +455,26 @@ fn main() -> anyhow::Result<()> {
     println!("  Output directory: {:?}", config.output_dir);
     println!("  Verify candidates: {}", config.verify_candidates);
     println!();
+    } // end if !bench_mode
 
     // Run search
     let result = parallel_search(&config)?;
 
-    // Print results
+    if bench_mode {
+        // Universal Benchmark Contract: R-line to stdout.
+        // Use total_checked (not config range size) to handle early timer expiry correctly.
+        let checked = result.total_checked;
+        let sec = result.search_duration.as_secs_f64();
+        let speed = checked as f64 / sec / 1e6;
+        let witness_count = result.witnesses.len();
+        println!(
+            "R\t{}\tbench\t{:.4}\t{}\t{:.2}\t{}",
+            config.target_k, sec, checked, speed, witness_count
+        );
+        std::process::exit(0);
+    }
+
+    // Normal mode: print results and write report
     print_results(&result, &config);
     if let Err(e) = write_search_report(&config, &result) {
         eprintln!("ERROR: failed to write search report: {e}");
