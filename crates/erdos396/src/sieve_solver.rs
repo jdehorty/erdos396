@@ -7,10 +7,10 @@
 //!
 //! Key difference from [`crate::search::parallel_search`]: this solver never
 //! computes per-element `is_governor[i]`. Instead it strips all prime factors
-//! into a `rem[]` array, scans for runs of `rem[j] <= 1`, and only calls
-//! [`exact_check_detailed`] on the rare candidates. This makes the hot path ~100x
-//! faster than the fused-sieve approach.
+//! into a `rem[]` array with inline v_p checks (rem=0 for rejected, rem=1 for
+//! confirmed governor), then scans for runs of `rem[j] == 1`.
 
+use crate::governor::vp_central_binom_dispatch;
 use crate::sieve::{build_prime_data, PrimeData, PrimeSieve};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
@@ -73,7 +73,7 @@ fn isqrt_u64(n: u64) -> u64 {
 // Const-generic strip with offset tracking (matches search-lab)
 // ---------------------------------------------------------------------------
 #[inline(always)]
-fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64) {
+fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64, block_l: u64) {
     const fn inv_p_const(p: u64) -> u64 {
         let mut inv = p.wrapping_mul(3) ^ 2;
         inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
@@ -94,19 +94,30 @@ fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64) {
     while j < w_block {
         unsafe {
             let r = *rem.add(j as usize);
+            if r == 0 { j += P; continue; } // already rejected
             let mut temp = r.wrapping_mul(inv);
+            let mut exp = 1u32;
             let mut q = temp.wrapping_mul(inv);
             if q <= limit {
                 temp = q;
+                exp += 1;
                 loop {
                     q = temp.wrapping_mul(inv);
                     if q > limit {
                         break;
                     }
                     temp = q;
+                    exp += 1;
                 }
             }
-            *rem.add(j as usize) = temp;
+            // Inline v_p check: v_P(C(2n,n)) >= v_P(n)
+            let n = block_l + j;
+            let supply = vp_central_binom_dispatch(n, P);
+            if (exp as u64) > supply {
+                *rem.add(j as usize) = 0; // rejected
+            } else {
+                *rem.add(j as usize) = temp;
+            }
         }
         j += P;
     }
@@ -124,24 +135,36 @@ fn process_prime_dyn(
     start_j: &mut u64,
     w_block: u64,
     rem: *mut u64,
+    block_l: u64,
 ) {
     let mut j = *start_j;
     while j < w_block {
         unsafe {
             let r = *rem.add(j as usize);
+            if r == 0 { j += p; continue; } // already rejected
             let mut temp = r.wrapping_mul(inv_p);
+            let mut exp = 1u32;
             let mut q = temp.wrapping_mul(inv_p);
             if q <= max_quot {
                 temp = q;
+                exp += 1;
                 loop {
                     q = temp.wrapping_mul(inv_p);
                     if q > max_quot {
                         break;
                     }
                     temp = q;
+                    exp += 1;
                 }
             }
-            *rem.add(j as usize) = temp;
+            // Inline v_p check
+            let n = block_l + j;
+            let supply = vp_central_binom_dispatch(n, p);
+            if (exp as u64) > supply {
+                *rem.add(j as usize) = 0; // rejected
+            } else {
+                *rem.add(j as usize) = temp;
+            }
         }
         j += p;
     }
@@ -152,10 +175,10 @@ fn process_prime_dyn(
 // Dispatch macro
 // ---------------------------------------------------------------------------
 macro_rules! dispatch_strip {
-    ($p:expr, $inv:expr, $limit:expr, $sj:expr, $w:expr, $rm:expr, [$($prime:literal),* $(,)?]) => {
+    ($p:expr, $inv:expr, $limit:expr, $sj:expr, $w:expr, $rm:expr, $bl:expr, [$($prime:literal),* $(,)?]) => {
         match $p {
-            $($prime => process_prime::<$prime>($sj, $w, $rm),)*
-            _ => process_prime_dyn($p, $inv, $limit, $sj, $w, $rm),
+            $($prime => process_prime::<$prime>($sj, $w, $rm, $bl),)*
+            _ => process_prime_dyn($p, $inv, $limit, $sj, $w, $rm, $bl),
         }
     };
 }
@@ -342,7 +365,7 @@ pub trait SolverHooks: Send + Sync {
     /// Called once per chunk per worker. Useful for checkpointing and progress.
     fn on_chunk_done(&self, _worker_id: u32, _chunk_start: u64, _chunk_end: u64) {}
 
-    /// A run of `length` consecutive smooth numbers was found starting at `start`.
+    /// A run of `length` consecutive governors was found starting at `start`.
     /// Only called when [`track_runs`](SolverHooks::track_runs) returns true.
     fn on_run(&self, _worker_id: u32, _start: u64, _length: usize) {}
 
@@ -549,13 +572,16 @@ pub fn solve<H: SolverHooks>(
                         let block_r = r_chunk.min(block_l + BLOCK_SIZE as u64 - 1);
                         let num_new = (block_r - block_l + 1) as u32;
 
-                        // Initialize new elements: strip factor of 2
+                        // Initialize new elements: strip factor of 2, check v_2
                         {
                             let mut x = block_l;
                             for idx_new in 0..num_new {
+                                let tz = x.trailing_zeros();
+                                let odd_part = x >> tz;
+                                // v_2 check: popcount(n) >= trailing_zeros(n)
+                                let val = if x.count_ones() >= tz { odd_part } else { 0 };
                                 unsafe {
-                                    *rem.as_mut_ptr().add((overlap + idx_new) as usize) =
-                                        x >> x.trailing_zeros();
+                                    *rem.as_mut_ptr().add((overlap + idx_new) as usize) = val;
                                 }
                                 x += 1;
                             }
@@ -580,6 +606,7 @@ pub fn solve<H: SolverHooks>(
                                     &mut sj,
                                     num_new_u64,
                                     rem_ptr,
+                                    block_l,
                                     [
                                         3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53,
                                         59, 61, 67, 71, 73, 79, 83, 89, 97
@@ -618,19 +645,30 @@ pub fn solve<H: SolverHooks>(
                                     let item = *b_ptr.add(i);
                                     let pd = &*pd_ptr.add(item.p_idx as usize);
                                     let r = *rem_ptr.add(item.offset as usize);
+                                    if r == 0 { continue; } // already rejected
                                     let mut temp = r.wrapping_mul(pd.inv_p);
+                                    let mut exp = 1u32;
                                     let mut q = temp.wrapping_mul(pd.inv_p);
                                     if q <= pd.max_quot {
                                         temp = q;
+                                        exp += 1;
                                         loop {
                                             q = temp.wrapping_mul(pd.inv_p);
                                             if q > pd.max_quot {
                                                 break;
                                             }
                                             temp = q;
+                                            exp += 1;
                                         }
                                     }
-                                    *rem_ptr.add(item.offset as usize) = temp;
+                                    // Inline v_p check
+                                    let n = block_l + item.offset as u64;
+                                    let supply = vp_central_binom_dispatch(n, pd.p);
+                                    if (exp as u64) > supply {
+                                        *rem_ptr.add(item.offset as usize) = 0;
+                                    } else {
+                                        *rem_ptr.add(item.offset as usize) = temp;
+                                    }
                                 }
                             }
                         }
@@ -640,7 +678,7 @@ pub fn solve<H: SolverHooks>(
                         while scan_j + k32 < w_search {
                             let mut i = k32 as i32;
                             while i >= 0
-                                && unsafe { *rem.as_ptr().add((scan_j + i as u32) as usize) } <= 1
+                                && unsafe { *rem.as_ptr().add((scan_j + i as u32) as usize) } == 1
                             {
                                 i -= 1;
                             }
@@ -689,7 +727,7 @@ pub fn solve<H: SolverHooks>(
                                 let chunk_pos = block_start as usize + j;
                                 if chunk_pos < effective_chunk as usize {
                                     smooth[chunk_pos] =
-                                        unsafe { *rem.as_ptr().add(overlap as usize + j) } <= 1;
+                                        unsafe { *rem.as_ptr().add(overlap as usize + j) } == 1;
                                 }
                             }
                         }
