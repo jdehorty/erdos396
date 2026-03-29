@@ -1,7 +1,9 @@
 # search-lab Benchmark (Rust + PGO)
 
-Per-k throughput with Profile-Guided Optimization. Trained on k=9,10
-full ranges + k=13 10B slice before optimized rebuild.
+Steady-state throughput with Profile-Guided Optimization. Trained on k=9,10
+full ranges + k=13 10B slice before optimized rebuild. Fixed n-ranges
+tuned for ~6s runtime; candidate counts and witness counts serve as
+the deterministic accuracy signature. 8s cool-down between.
 
 ## Environment
 
@@ -13,15 +15,17 @@ full ranges + k=13 10B slice before optimized rebuild.
 | **Threads** | 16 |
 | **Compiler** | `rustc 1.87.0 (17067e9ac 2025-05-09) (Homebrew)` |
 | **PGO** | yes (profile-generate + profile-use) |
-| **Commit** | `7548c86` |
-| **Date** | 2026-03-29 02:14:21 UTC |
+| **Commit** | `ea9c6b3` |
+| **Date** | 2026-03-29 02:58:32 UTC |
 
 ## Results
 
-| k | Range | Candidates | Time (s) | Throughput (M/s) |
-|--:|:------|-----------:|---------:|-----------------:|
-| 9 | `[339949252, 1019547845)` | 679,598,593 | 0.1541 | 4410.1 |
-| 10 | `[1019547844, 17609764995)` | 16,590,217,151 | 4.9274 | 3366.9 |
-| 11 | `[17609764994, 67609764994)` | 50,000,000,000 | 17.3843 | 2876.2 |
-| 13 | `[18185829921842, 18253129921842)` | 67,300,000,000 | 43.5797 | 1544.3 |
+| k | Range | Candidates | Witnesses | Time (s) | Throughput (M/s) |
+|--:|:------|-----------:|----------:|---------:|-----------------:|
+| 8 | `[339,949,252, 18,339,949,252)` | 18,000,000,000 | 39 | 5.5470 | 3245.0 |
+| 9 | `[1,019,547,844, 19,019,547,844)` | 18,000,000,000 | 2 | 4.9441 | 3640.7 |
+| 10 | `[17,609,764,994, 34,609,764,994)` | 17,000,000,000 | 0 | 5.0622 | 3358.3 |
+| 11 | `[1,070,858,041,585, 1,086,858,041,585)` | 16,000,000,000 | 0 | 5.5643 | 2875.5 |
+| 12 | `[5,048,891,644,646, 5,061,891,644,646)` | 13,000,000,000 | 0 | 5.4689 | 2377.1 |
+| 13 | `[18,253,129,921,842, 18,264,129,921,842)` | 11,000,000,000 | 0 | 5.1125 | 2151.6 |
 
