@@ -1,0 +1,17 @@
+[package]
+name = "carry-diagnostic"
+version = "0.1.0"
+edition = "2021"
+description = "Near-miss scanner for studying carry structure compensation in Erdős Problem #396"
+license = "MIT"
+
+[[bin]]
+name = "carry-diagnostic"
+path = "src/main.rs"
+
+[dependencies]
+erdos396 = { path = "../erdos396" }
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rayon = "1.10"

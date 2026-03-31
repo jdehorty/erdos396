@@ -887,3 +887,259 @@ fn main() {
         let _ = fs::remove_file("checkpoint.txt");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Known-good first witnesses for k=1..11 over [1, 18_000_000_000].
+    ///
+    /// This is the "standard candle" test: deterministic, covers the full
+    /// sieve + exact_check pipeline, and matches the C++ reference output.
+    ///
+    /// Expected R-line results:
+    ///   k=1  → 2
+    ///   k=2  → 2480
+    ///   k=3  → 8178
+    ///   k=4  → 45153
+    ///   k=5  → 3648841
+    ///   k=6  → 7979090
+    ///   k=7  → 101130029
+    ///   k=8  → 339949252
+    ///   k=9  → 1019547844
+    ///   k=10 → 17609764994
+    ///   k=11 → none (no witness in [1, 18B])
+    // -----------------------------------------------------------------------
+    // mod_inverse_u64: the entire sieve correctness hinges on this.
+    // Verify n * inv ≡ 1 (mod 2^64) for a spread of odd primes.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn mod_inverse_identity() {
+        let test_primes: &[u64] = &[
+            3, 5, 7, 11, 13, 97, 101, 251, 1009, 65537, 104729,
+            // Large primes near u32/u64 boundaries where bugs like to hide
+            2_147_483_647,    // 2^31 - 1 (Mersenne prime)
+            4_294_967_291,    // largest prime < 2^32
+            1_000_000_007,    // common large prime
+        ];
+        for &p in test_primes {
+            let inv = mod_inverse_u64(p);
+            assert_eq!(
+                p.wrapping_mul(inv),
+                1,
+                "mod_inverse broken for p={}: p*inv = {}",
+                p,
+                p.wrapping_mul(inv)
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // isqrt_u64: f64 loses precision above 2^53, so the Newton correction
+    // path is critical. Test values where f64 sqrt gives wrong answers.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn isqrt_edge_cases() {
+        // Zero
+        assert_eq!(isqrt_u64(0), 0);
+        // Perfect squares
+        assert_eq!(isqrt_u64(1), 1);
+        assert_eq!(isqrt_u64(4), 2);
+        assert_eq!(isqrt_u64(9), 3);
+        assert_eq!(isqrt_u64(1_000_000), 1000);
+        // Non-perfect squares
+        assert_eq!(isqrt_u64(2), 1);
+        assert_eq!(isqrt_u64(8), 2);
+        assert_eq!(isqrt_u64(10), 3);
+        // Large values where f64 loses precision (> 2^53)
+        // (2^32)^2 = 2^64 overflows, but (2^32 - 1)^2 fits
+        let large = (1u64 << 32) - 1; // 4294967295
+        assert_eq!(isqrt_u64(large * large), large);
+        assert_eq!(isqrt_u64(large * large - 1), large - 1);
+        assert_eq!(isqrt_u64(large * large + 1), large);
+        // Near u64::MAX — isqrt(u64::MAX) should be 2^32 - 1 = 4294967295
+        assert_eq!(isqrt_u64(u64::MAX), (1u64 << 32) - 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // sieve_primes: verify against known prime-counting function values.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn sieve_known_counts() {
+        let primes = sieve_primes(1_000_000);
+        // π(100) = 25, π(1000) = 168, π(10000) = 1229, π(1000000) = 78498
+        let pi_100 = primes.iter().filter(|&&p| p <= 100).count();
+        let pi_1k = primes.iter().filter(|&&p| p <= 1000).count();
+        let pi_10k = primes.iter().filter(|&&p| p <= 10_000).count();
+        assert_eq!(pi_100, 25, "π(100)");
+        assert_eq!(pi_1k, 168, "π(1000)");
+        assert_eq!(pi_10k, 1229, "π(10000)");
+        assert_eq!(primes.len(), 78498, "π(1000000)");
+        // First and last
+        assert_eq!(primes[0], 2);
+        assert_eq!(*primes.last().unwrap(), 999983);
+    }
+
+    // -----------------------------------------------------------------------
+    // exact_check: test known witnesses and known non-witnesses directly.
+    // This isolates the Kummer/Legendre logic from the sieve.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn exact_check_known_values() {
+        let primes = sieve_primes(200_000_000);
+        let prime_data = build_prime_data(&primes);
+
+        // Known witnesses (from the big test) must pass exact_check
+        let witnesses: &[(u64, u64)] = &[
+            (1, 2),
+            (2, 2480),
+            (3, 8178),
+            (4, 45153),
+            (5, 3648841),
+            (6, 7979090),
+            (7, 101130029),
+            (8, 339949252),
+            (9, 1019547844),
+        ];
+        for &(k, n) in witnesses {
+            assert!(
+                exact_check(n, k, &prime_data),
+                "exact_check should accept known witness k={}, n={}",
+                k, n
+            );
+        }
+
+        // Just below each witness should NOT be a witness (otherwise it
+        // wouldn't be the *first* witness). Spot-check a few.
+        for &(k, n) in &witnesses[2..] {
+            assert!(
+                !exact_check(n - 1, k, &prime_data),
+                "n={} (one below k={} witness) should fail exact_check",
+                n - 1, k
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // process_prime vs process_prime_dyn: the const-generic and dynamic
+    // strip paths must produce identical results for the same prime.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn const_vs_dynamic_strip_consistency() {
+        // Set up a block of consecutive values starting at some offset
+        let block_start: u64 = 1_000_000;
+        let block_size: u64 = 1024;
+        let p: u64 = 7;
+        let inv_p = mod_inverse_u64(p);
+        let max_quot = u64::MAX / p;
+
+        // Prepare two identical buffers: values with factor-of-2 stripped
+        let mut rem_const = vec![0u64; block_size as usize];
+        let mut rem_dyn = vec![0u64; block_size as usize];
+        for j in 0..block_size {
+            let x = block_start + j;
+            let v = x >> x.trailing_zeros();
+            rem_const[j as usize] = v;
+            rem_dyn[j as usize] = v;
+        }
+
+        let mut sj_const = block_start % p;
+        if sj_const != 0 {
+            sj_const = p - sj_const;
+        }
+        let mut sj_dyn = sj_const;
+
+        process_prime::<7>(&mut sj_const, block_size, rem_const.as_mut_ptr());
+        process_prime_dyn(p, inv_p, max_quot, &mut sj_dyn, block_size, rem_dyn.as_mut_ptr());
+
+        assert_eq!(sj_const, sj_dyn, "start_j diverged");
+        assert_eq!(rem_const, rem_dyn, "rem buffers diverged for p=7");
+    }
+
+    // -----------------------------------------------------------------------
+    // Thread-count independence: same witness regardless of parallelism.
+    // Uses k=5 (witness at 3648841) as a quick check.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn thread_count_independence() {
+        let primes = sieve_primes(200_000_000);
+        let prime_data = build_prime_data(&primes);
+        let end = 4_000_000u64;
+
+        let (ans_1t, _, _) = solve(5, 1, end, &prime_data, 1, 0, false, 0.0);
+        let (ans_2t, _, _) = solve(5, 1, end, &prime_data, 2, 0, false, 0.0);
+        let (ans_8t, _, _) = solve(5, 1, end, &prime_data, 8, 0, false, 0.0);
+
+        assert_eq!(ans_1t, 3648841);
+        assert_eq!(ans_1t, ans_2t, "1-thread vs 2-thread disagree");
+        assert_eq!(ans_1t, ans_8t, "1-thread vs 8-thread disagree");
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty/degenerate ranges: should return no witness without panicking.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn empty_range_returns_no_witness() {
+        let primes = sieve_primes(200_000_000);
+        let prime_data = build_prime_data(&primes);
+
+        // start == end
+        let (ans, _, _) = solve(3, 100, 100, &prime_data, 1, 0, false, 0.0);
+        assert_eq!(ans, u64::MAX, "empty range should find no witness");
+
+        // Range that contains no witness for k=3 (witness is at 8178)
+        let (ans, _, _) = solve(3, 8179, 8200, &prime_data, 1, 0, false, 0.0);
+        assert_eq!(ans, u64::MAX, "range past k=3 witness should find nothing");
+    }
+
+    // -----------------------------------------------------------------------
+    // Full pipeline: known-good first witnesses for k=1..11.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn known_witnesses_k1_through_k11() {
+        let expected: &[(u64, Option<u64>)] = &[
+            (1, Some(2)),
+            (2, Some(2480)),
+            (3, Some(8178)),
+            (4, Some(45153)),
+            (5, Some(3648841)),
+            (6, Some(7979090)),
+            (7, Some(101130029)),
+            (8, Some(339949252)),
+            (9, Some(1019547844)),
+            (10, Some(17609764994)),
+            (11, None), // no witness in [1, 18B]
+        ];
+
+        let primes = sieve_primes(200_000_000);
+        let prime_data = build_prime_data(&primes);
+
+        let end = 18_000_000_000u64;
+        let mut start = 1u64;
+
+        for &(k, expected_witness) in expected {
+            let (ans, _chunks, _witnesses) =
+                solve(k, start, end, &prime_data, 4, 0, false, 0.0);
+
+            match expected_witness {
+                Some(w) => {
+                    assert_eq!(
+                        ans, w,
+                        "k={}: expected witness {} but got {}",
+                        k, w, ans
+                    );
+                    // Next k starts from this witness (matches CLI chaining behavior)
+                    start = ans;
+                }
+                None => {
+                    assert_eq!(
+                        ans,
+                        u64::MAX,
+                        "k={}: expected no witness but got {}",
+                        k, ans
+                    );
+                }
+            }
+        }
+    }
+}

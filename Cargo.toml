@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/erdos396", "crates/search-lab"]
+members = ["crates/erdos396", "crates/carry-diagnostic", "crates/search-lab"]
 resolver = "2"
 
 [profile.dev]

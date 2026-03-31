@@ -160,27 +160,69 @@ iterations per prime — and for p=2 it reduces to a single `POPCNT` instruction
 
 ## Architecture
 
+The project is structured as a Cargo workspace with three crates:
+
+### `crates/erdos396/` — Core library and binaries
+
 | File | Purpose |
 |------|---------|
+| `src/lib.rs` | Library root — public API for sieves, governors, verification |
+| `src/main.rs` | Main search binary (`erdos396`) |
 | `src/sieve.rs` | Prime sieve (Sieve of Eratosthenes) |
+| `src/sieve_solver.rs` | Range-based solver with per-worker checkpoints and resume |
 | `src/factor.rs` | Integer factorization via trial division |
 | `src/governor.rs` | Governor Set membership via Kummer's theorem |
 | `src/prefilter.rs` | Fused sieve+governor batch computation (hot loop) |
 | `src/verify.rs` | Full witness verification with p-adic analysis |
 | `src/search.rs` | Parallel search with rayon, run detection, checkpointing |
 | `src/checkpoint.rs` | Checkpoint save/resume for long-running searches |
-| `src/bin/verify.rs` | CLI for verifying individual or known witnesses |
-| `src/bin/validate.rs` | Provably complete small-prime sieve (Corollary 6) |
-| `src/bin/audit_runs.rs` | Audit run logs (`runs_k*_w*.jsonl`) by full verification |
-| `formal/` | Lean 4 proof of the Small Prime Barrier Theorem |
-| `docs/` | Mathematical exposition and validation architecture |
+| `src/int_math.rs` | Exact integer arithmetic (isqrt, etc. — no floats on critical paths) |
+| `src/build_info.rs` | Compile-time build metadata for reproducibility |
+| `src/false_positive/` | False positive classification and analysis |
+| `src/run_collection/` | Run log collection, expansion, and Parquet export |
+
+**Binaries** (all under `src/bin/`):
+
+| Binary | Purpose |
+|--------|---------|
+| `verify` | Verify individual or known witnesses via full p-adic check |
+| `validate` | Provably complete small-prime sieve for minimality certificates (Corollary 6) |
+| `audit_runs` | Audit run logs (`runs_k*_w*.jsonl`) by full verification |
+| `build_run_corpus` | Build a consolidated run corpus from checkpoint directories |
+| `classify_run_windows` | Classify governor-run windows by false positive structure |
+| `query_run_windows` | Query and filter run window data |
+| `analyze_false_positives` | Analyze false positive patterns across search ranges |
+
+### `crates/carry-diagnostic/` — Non-governor witness scanner
+
+Near-miss scanner that finds and analyzes non-governor witnesses via carry
+compensation at barrier primes. Produced the empirical dataset behind the
+non-governor witness sequence and the conjectures in `docs/formal_verification_rationale.md`.
+
+### `crates/search-lab/` — Lightweight sieve testbed
+
+Minimal, self-contained witness search for algorithm development. Includes a
+test suite with known-good witnesses for k=1 through k=11 and component-level
+edge case tests.
+
+### Other directories
+
+| Directory | Purpose |
+|-----------|---------|
+| `formal/` | Lean 4 + Mathlib proof of the Small Prime Barrier Theorem |
+| `certificates/` | Public minimality certificate bundles for k=8 through k=13 |
+| `certificates/scripts/` | Independent Python verification scripts (stdlib-only) |
+| `docs/` | Mathematical exposition, validation architecture, trust model |
 
 ## Formal Verification
 
 The `formal/` directory contains a standalone Lean 4 + Mathlib project that
 machine-checks the Small Prime Barrier Theorem. See [`formal/README.md`](formal/README.md)
-for build instructions and a summary of what is proven. For an informal Lean↔Rust mapping,
-see `docs/lean_rust_bridge.md`.
+for build instructions and a summary of what is proven.
+
+For the rationale behind formal verification in this project and future
+formalization targets, see `docs/formal_verification_rationale.md`. For the
+informal Lean↔Rust mapping, see `docs/lean_rust_bridge.md`.
 
 ## Citation
 
