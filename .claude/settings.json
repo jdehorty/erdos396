@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/pre-commit-lint.sh",
+            "if": "Bash(git commit *)",
+            "timeout": 120,
+            "statusMessage": "Running cargo fmt check + clippy..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/stop-fmt.sh",
+            "timeout": 30,
+            "statusMessage": "Formatting Rust code..."
+          }
+        ]
+      }
+    ]
+  }
+}
