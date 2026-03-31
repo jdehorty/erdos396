@@ -12,8 +12,8 @@
 //! Reported run lengths are verified against the true governor check so statistics
 //! are accurate without slowing down the hot sieve loop.
 
-use crate::governor::GovernorChecker;
 use crate::governor::vp_central_binom_dispatch;
+use crate::governor::GovernorChecker;
 use crate::sieve::{build_prime_data, PrimeData, PrimeSieve};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
@@ -97,7 +97,10 @@ fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64, b
     while j < w_block {
         unsafe {
             let r = *rem.add(j as usize);
-            if r == 0 { j += P; continue; }
+            if r == 0 {
+                j += P;
+                continue;
+            }
             let mut temp = r.wrapping_mul(inv);
             let mut exp = 1u32;
             let mut q = temp.wrapping_mul(inv);
@@ -106,7 +109,9 @@ fn process_prime<const P: u64>(start_j: &mut u64, w_block: u64, rem: *mut u64, b
                 exp += 1;
                 loop {
                     q = temp.wrapping_mul(inv);
-                    if q > limit { break; }
+                    if q > limit {
+                        break;
+                    }
                     temp = q;
                     exp += 1;
                 }
@@ -142,7 +147,10 @@ fn process_prime_dyn(
     while j < w_block {
         unsafe {
             let r = *rem.add(j as usize);
-            if r == 0 { j += p; continue; }
+            if r == 0 {
+                j += p;
+                continue;
+            }
             let mut temp = r.wrapping_mul(inv_p);
             let mut exp = 1u32;
             let mut q = temp.wrapping_mul(inv_p);
@@ -151,7 +159,9 @@ fn process_prime_dyn(
                 exp += 1;
                 loop {
                     q = temp.wrapping_mul(inv_p);
-                    if q > max_quot { break; }
+                    if q > max_quot {
+                        break;
+                    }
                     temp = q;
                     exp += 1;
                 }
@@ -777,7 +787,9 @@ pub fn solve<H: SolverHooks>(
                                         for j in 0..run_len {
                                             let n = run_start + j as u64;
                                             if checker.is_governor_fast(n) {
-                                                if vlen == 0 { vstart = n; }
+                                                if vlen == 0 {
+                                                    vstart = n;
+                                                }
                                                 vlen += 1;
                                             } else {
                                                 if vlen >= min_run {
@@ -804,7 +816,9 @@ pub fn solve<H: SolverHooks>(
                                 for j in 0..run_len {
                                     let n = run_start + j as u64;
                                     if checker.is_governor_fast(n) {
-                                        if vlen == 0 { vstart = n; }
+                                        if vlen == 0 {
+                                            vstart = n;
+                                        }
                                         vlen += 1;
                                     } else {
                                         if vlen >= min_run {
@@ -837,8 +851,6 @@ pub fn solve<H: SolverHooks>(
         duration,
     }
 }
-
-
 
 /// Per-worker range assignment for checkpoint resume.
 #[derive(Clone)]
@@ -875,14 +887,14 @@ pub fn solve_ranges<H: SolverHooks>(
     let total_chunks_done = AtomicU64::new(0);
 
     // Compute total range for progress reporting
-    let global_start = ranges.iter().map(|r| r.start).min().unwrap_or(0);
-    let global_end = ranges.iter().map(|r| r.end).max().unwrap_or(0);
+    let _global_start = ranges.iter().map(|r| r.start).min().unwrap_or(0);
+    let _global_end = ranges.iter().map(|r| r.end).max().unwrap_or(0);
 
     std::thread::scope(|s| {
         // Progress reporter thread
         if progress {
             let total_chunks_ref = &total_chunks_done;
-            let global_min_ref = &global_min_n;
+            let _global_min_ref = &global_min_n;
             let time_up_ref = &time_up;
             s.spawn(move || {
                 let mut last_chunks: u64 = 0;
@@ -897,8 +909,11 @@ pub fn solve_ranges<H: SolverHooks>(
                     let cumulative_mcps = total_candidates as f64 / elapsed / 1e6;
                     eprintln!(
                         "P\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.4}",
-                        k, mcps, cumulative_mcps,
-                        total_candidates as f64 / 1e9, elapsed
+                        k,
+                        mcps,
+                        cumulative_mcps,
+                        total_candidates as f64 / 1e9,
+                        elapsed
                     );
                     last_chunks = chunks_now;
 
@@ -1027,9 +1042,17 @@ pub fn solve_ranges<H: SolverHooks>(
                                 let inv = prime_data[idx].inv_p;
                                 let limit = prime_data[idx].max_quot;
                                 dispatch_strip!(
-                                    p, inv, limit, &mut sj, num_new_u64, rem_ptr, block_l,
-                                    [3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53,
-                                     59, 61, 67, 71, 73, 79, 83, 89, 97]
+                                    p,
+                                    inv,
+                                    limit,
+                                    &mut sj,
+                                    num_new_u64,
+                                    rem_ptr,
+                                    block_l,
+                                    [
+                                        3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53,
+                                        59, 61, 67, 71, 73, 79, 83, 89, 97
+                                    ]
                                 );
                                 prime_offsets[idx] = sj;
                             } else {
@@ -1064,7 +1087,9 @@ pub fn solve_ranges<H: SolverHooks>(
                                     let item = *b_ptr.add(i);
                                     let pd = &*pd_ptr.add(item.p_idx as usize);
                                     let r = *rem_ptr.add(item.offset as usize);
-                                    if r == 0 { continue; }
+                                    if r == 0 {
+                                        continue;
+                                    }
                                     let mut temp = r.wrapping_mul(pd.inv_p);
                                     let mut exp = 1u32;
                                     let mut q = temp.wrapping_mul(pd.inv_p);
@@ -1073,7 +1098,9 @@ pub fn solve_ranges<H: SolverHooks>(
                                         exp += 1;
                                         loop {
                                             q = temp.wrapping_mul(pd.inv_p);
-                                            if q > pd.max_quot { break; }
+                                            if q > pd.max_quot {
+                                                break;
+                                            }
                                             temp = q;
                                             exp += 1;
                                         }
@@ -1106,7 +1133,9 @@ pub fn solve_ranges<H: SolverHooks>(
                                         !bench_mode && cand_n >= global_min_n.load(Relaxed);
                                     if !dominated {
                                         match exact_check_detailed(
-                                            cand_n, k, &prime_data[..chunk_total_primes],
+                                            cand_n,
+                                            k,
+                                            &prime_data[..chunk_total_primes],
                                         ) {
                                             Ok(()) => {
                                                 witness_count.fetch_add(1, Relaxed);
@@ -1171,7 +1200,9 @@ pub fn solve_ranges<H: SolverHooks>(
                             smooth.iter().enumerate().take(effective_chunk as usize)
                         {
                             if is_smooth {
-                                if run_len == 0 { run_start = l_chunk + i as u64; }
+                                if run_len == 0 {
+                                    run_start = l_chunk + i as u64;
+                                }
                                 run_len += 1;
                             } else {
                                 if run_len >= min_run {
@@ -1202,7 +1233,8 @@ pub fn solve_ranges<H: SolverHooks>(
                             "version": 4,
                         });
                         if let Ok(json) = serde_json::to_string_pretty(&cp) {
-                            let path = output_dir.join(format!("checkpoint_k{}_w{:02}.json", k, wr.worker_id));
+                            let path = output_dir
+                                .join(format!("checkpoint_k{}_w{:02}.json", k, wr.worker_id));
                             let tmp = path.with_extension("tmp");
                             let _ = std::fs::write(&tmp, &json);
                             let _ = std::fs::rename(&tmp, &path);

@@ -916,11 +916,21 @@ mod tests {
     #[test]
     fn mod_inverse_identity() {
         let test_primes: &[u64] = &[
-            3, 5, 7, 11, 13, 97, 101, 251, 1009, 65537, 104729,
+            3,
+            5,
+            7,
+            11,
+            13,
+            97,
+            101,
+            251,
+            1009,
+            65537,
+            104729,
             // Large primes near u32/u64 boundaries where bugs like to hide
-            2_147_483_647,    // 2^31 - 1 (Mersenne prime)
-            4_294_967_291,    // largest prime < 2^32
-            1_000_000_007,    // common large prime
+            2_147_483_647, // 2^31 - 1 (Mersenne prime)
+            4_294_967_291, // largest prime < 2^32
+            1_000_000_007, // common large prime
         ];
         for &p in test_primes {
             let inv = mod_inverse_u64(p);
@@ -1005,7 +1015,8 @@ mod tests {
             assert!(
                 exact_check(n, k, &prime_data),
                 "exact_check should accept known witness k={}, n={}",
-                k, n
+                k,
+                n
             );
         }
 
@@ -1015,7 +1026,8 @@ mod tests {
             assert!(
                 !exact_check(n - 1, k, &prime_data),
                 "n={} (one below k={} witness) should fail exact_check",
-                n - 1, k
+                n - 1,
+                k
             );
         }
     }
@@ -1050,7 +1062,14 @@ mod tests {
         let mut sj_dyn = sj_const;
 
         process_prime::<7>(&mut sj_const, block_size, rem_const.as_mut_ptr());
-        process_prime_dyn(p, inv_p, max_quot, &mut sj_dyn, block_size, rem_dyn.as_mut_ptr());
+        process_prime_dyn(
+            p,
+            inv_p,
+            max_quot,
+            &mut sj_dyn,
+            block_size,
+            rem_dyn.as_mut_ptr(),
+        );
 
         assert_eq!(sj_const, sj_dyn, "start_j diverged");
         assert_eq!(rem_const, rem_dyn, "rem buffers diverged for p=7");
@@ -1118,16 +1137,11 @@ mod tests {
         let mut start = 1u64;
 
         for &(k, expected_witness) in expected {
-            let (ans, _chunks, _witnesses) =
-                solve(k, start, end, &prime_data, 4, 0, false, 0.0);
+            let (ans, _chunks, _witnesses) = solve(k, start, end, &prime_data, 4, 0, false, 0.0);
 
             match expected_witness {
                 Some(w) => {
-                    assert_eq!(
-                        ans, w,
-                        "k={}: expected witness {} but got {}",
-                        k, w, ans
-                    );
+                    assert_eq!(ans, w, "k={}: expected witness {} but got {}", k, w, ans);
                     // Next k starts from this witness (matches CLI chaining behavior)
                     start = ans;
                 }
@@ -1136,7 +1150,8 @@ mod tests {
                         ans,
                         u64::MAX,
                         "k={}: expected no witness but got {}",
-                        k, ans
+                        k,
+                        ans
                     );
                 }
             }
@@ -1155,8 +1170,15 @@ mod tests {
         // Test Barrett floor(n / p) at a variety of offsets across the search range.
         // The Barrett quotient is: ((n as u128 * magic as u128) >> 64) >> shift
         let test_offsets: &[u64] = &[
-            0, 1, 100, CHUNK_SIZE, 1_000_000_000, 10_000_000_000, 100_000_000_000,
-            u64::MAX / 2, u64::MAX - 1,
+            0,
+            1,
+            100,
+            CHUNK_SIZE,
+            1_000_000_000,
+            10_000_000_000,
+            100_000_000_000,
+            u64::MAX / 2,
+            u64::MAX - 1,
         ];
 
         for pd in prime_data.iter().skip(1) {
@@ -1211,7 +1233,10 @@ mod tests {
                     assert!(
                         r % p != 0 || r == 0,
                         "p={}: position {} (value {}) still has factor of p after strip, rem={}",
-                        p, j, x, r
+                        p,
+                        j,
+                        x,
+                        r
                     );
                 }
             }
@@ -1245,7 +1270,14 @@ mod tests {
             if sj != 0 {
                 sj = pd.p - sj;
             }
-            process_prime_dyn(pd.p, pd.inv_p, pd.max_quot, &mut sj, block_size, rem.as_mut_ptr());
+            process_prime_dyn(
+                pd.p,
+                pd.inv_p,
+                pd.max_quot,
+                &mut sj,
+                block_size,
+                rem.as_mut_ptr(),
+            );
         }
 
         // Numbers whose only prime factors are <= limit should now be 1.
@@ -1274,7 +1306,8 @@ mod tests {
                 assert!(
                     rem[j as usize] > 1,
                     "Non-smooth x={} should have residual > 1, got {}",
-                    x, rem[j as usize]
+                    x,
+                    rem[j as usize]
                 );
             }
         }
@@ -1366,8 +1399,8 @@ mod tests {
     #[test]
     fn const_vs_dynamic_all_dispatched_primes() {
         let dispatched: &[u64] = &[
-            3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79,
-            83, 89, 97,
+            3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83,
+            89, 97,
         ];
 
         let block_start: u64 = 10_000_000;
@@ -1391,7 +1424,14 @@ mod tests {
             let mut sj_const = sj_dyn;
 
             // Dynamic path
-            process_prime_dyn(p, inv_p, max_quot, &mut sj_dyn, block_size, rem_dyn.as_mut_ptr());
+            process_prime_dyn(
+                p,
+                inv_p,
+                max_quot,
+                &mut sj_dyn,
+                block_size,
+                rem_dyn.as_mut_ptr(),
+            );
 
             // Const-generic path via macro-style dispatch
             macro_rules! test_const {
@@ -1403,16 +1443,12 @@ mod tests {
                 };
             }
             test_const!(
-                3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73,
-                79, 83, 89, 97
+                3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79,
+                83, 89, 97
             );
 
             assert_eq!(sj_const, sj_dyn, "start_j diverged for p={}", p);
-            assert_eq!(
-                rem_const, rem_dyn,
-                "rem buffers diverged for p={}",
-                p
-            );
+            assert_eq!(rem_const, rem_dyn, "rem buffers diverged for p={}", p);
         }
     }
 }

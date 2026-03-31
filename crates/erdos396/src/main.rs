@@ -619,16 +619,14 @@ fn main() -> anyhow::Result<()> {
         t0.elapsed().as_secs_f64()
     );
 
-
     // Compute resume point from existing per-worker checkpoint files
-    let resume_chunks: u64 = {
+    let _resume_chunks: u64 = {
         let mut min_pos: u64 = config.start;
         let mut found_any = false;
         for w in 0..config.num_workers {
-            let cp_path = config.output_dir.join(format!(
-                "checkpoint_k{}_w{:02}.json",
-                config.target_k, w
-            ));
+            let cp_path = config
+                .output_dir
+                .join(format!("checkpoint_k{}_w{:02}.json", config.target_k, w));
             if cp_path.exists() {
                 if let Ok(data) = std::fs::read_to_string(&cp_path) {
                     if let Ok(cp) = serde_json::from_str::<serde_json::Value>(&data) {
@@ -647,7 +645,10 @@ fn main() -> anyhow::Result<()> {
             let chunks = skip / 1_048_576;
             eprintln!(
                 "# Resuming: min_pos={} ({:.3}T), skipping {} chunks ({:.2}T)",
-                min_pos, min_pos as f64 / 1e12, chunks, (chunks * 1_048_576) as f64 / 1e12
+                min_pos,
+                min_pos as f64 / 1e12,
+                chunks,
+                (chunks * 1_048_576) as f64 / 1e12
             );
             chunks
         } else {
@@ -701,25 +702,35 @@ fn main() -> anyhow::Result<()> {
         };
 
         // Check for per-worker checkpoint
-        let cp_path = config.output_dir.join(format!(
-            "checkpoint_k{}_w{:02}.json",
-            config.target_k, w
-        ));
+        let cp_path = config
+            .output_dir
+            .join(format!("checkpoint_k{}_w{:02}.json", config.target_k, w));
         let resume_pos = if cp_path.exists() {
             if let Ok(data) = std::fs::read_to_string(&cp_path) {
                 if let Ok(cp) = serde_json::from_str::<serde_json::Value>(&data) {
                     let cp_start = cp.get("start").and_then(|v| v.as_u64()).unwrap_or(0);
                     let cp_end = cp.get("end").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let pos = cp.get("current_pos").and_then(|v| v.as_u64()).unwrap_or(w_start);
+                    let pos = cp
+                        .get("current_pos")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(w_start);
                     if cp_start == w_start && cp_end == w_end {
-                        eprintln!("# w{:02}: resuming from {:.6}T (checkpoint)", w, pos as f64 / 1e12);
+                        eprintln!(
+                            "# w{:02}: resuming from {:.6}T (checkpoint)",
+                            w,
+                            pos as f64 / 1e12
+                        );
                         pos
                     } else {
                         eprintln!("# w{:02}: checkpoint range mismatch, starting fresh", w);
                         w_start
                     }
-                } else { w_start }
-            } else { w_start }
+                } else {
+                    w_start
+                }
+            } else {
+                w_start
+            }
         } else {
             w_start
         };
