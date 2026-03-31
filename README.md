@@ -1,6 +1,6 @@
 # Erdős Problem #396 — Witness Search
 
-Paper companion repository for *Witness Search for Erdős Problem #396*.
+Computational search and formal verification for Erdős Problem #396.
 
 > For each *k*, find the smallest *n* such that *n*(*n*−1)(*n*−2)⋯(*n*−*k*) divides C(2*n*, *n*).
 
