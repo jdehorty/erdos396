@@ -11,3 +11,11 @@ rev = "v4.15.0"
 [[lean_lib]]
 name = "SmallPrimeBarrier"
 roots = ["SmallPrimeBarrier"]
+
+[[lean_lib]]
+name = "Erdos396FFI"
+roots = ["Erdos396FFI"]
+
+[[lean_exe]]
+name = "erdos396ffi"
+root = "Erdos396FFI.Main"
