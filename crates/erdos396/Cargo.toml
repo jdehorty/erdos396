@@ -24,7 +24,7 @@ num_cpus = "1.16"
 # Small vector optimization
 smallvec = "1.13"
 
-# CLI (used by library checkpoint/search config types)
+# CLI (used by archived binaries; not consumed by the library itself)
 clap = { version = "4.4", features = ["derive"] }
 
 # Serialization for checkpoints

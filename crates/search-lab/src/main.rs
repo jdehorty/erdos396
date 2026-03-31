@@ -753,7 +753,7 @@ const KNOWN_WITNESSES: &[(u64, u64)] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Verify — detailed witness verification using Legendre's formula
+// Verify — detailed witness verification
 // ---------------------------------------------------------------------------
 
 /// Verify a single (k, n) witness with a detailed per-prime report.
@@ -773,7 +773,13 @@ fn verify_witness(k: u64, n: u64, prime_data: &[PrimeData]) -> bool {
     println!("Verifying k={}, n={}", k, n);
     println!();
 
-    // p=2: popcount-based check
+    // p=2: v_2(C(2n,n)) >= v_2(n!/(n-k-1)!) via Kummer/popcount.
+    // Demand = v_2(n!/(n-k-1)!) = (popcount(n-k-1) - popcount(n) + k+1).
+    // Wrapping arithmetic is correct here: the formula is evaluated mod 2^64
+    // and the final comparison supply >= demand holds iff the true (signed)
+    // demand is non-negative and at most supply. When the true value is
+    // negative, wrapping produces a large u64 that fails supply >= demand,
+    // giving the correct PASS result.
     {
         let supply = n.count_ones() as u64;
         let nk1_ones = (n - k - 1).count_ones() as u64;
@@ -920,10 +926,19 @@ fn verify_witness(k: u64, n: u64, prime_data: &[PrimeData]) -> bool {
 }
 
 /// Verify all known OEIS A375077 witnesses.
+/// Uses exact_check (the search-path function) for speed rather than the
+/// verbose verify_witness. This is intentional: batch mode prints one line
+/// per witness, not a full per-prime report.
 fn verify_all_known(prime_data: &[PrimeData]) -> bool {
     println!("Verifying all known OEIS A375077 witnesses...\n");
     let mut all_pass = true;
     for &(k, n) in KNOWN_WITNESSES {
+        debug_assert!(
+            k > 0 && n > k,
+            "KNOWN_WITNESSES entry ({}, {}) violates n > k",
+            k,
+            n
+        );
         let pass = exact_check(n, k, prime_data);
         let status = if pass { "PASS" } else { "FAIL" };
         println!("  k={:2}, n={:>20}: {}", k, n, status);
@@ -997,11 +1012,20 @@ fn main() {
                 bench_secs = args[i].parse().unwrap();
             }
             "--verify" => {
-                // --verify K N
+                if i + 2 >= args.len() {
+                    eprintln!("Error: --verify requires two arguments: --verify <k> <n>");
+                    std::process::exit(1);
+                }
                 i += 1;
-                verify_k = Some(args[i].parse().unwrap());
+                verify_k = Some(args[i].parse().unwrap_or_else(|e| {
+                    eprintln!("Error: invalid k value '{}': {}", args[i], e);
+                    std::process::exit(1);
+                }));
                 i += 1;
-                verify_n = Some(args[i].parse().unwrap());
+                verify_n = Some(args[i].parse().unwrap_or_else(|e| {
+                    eprintln!("Error: invalid n value '{}': {}", args[i], e);
+                    std::process::exit(1);
+                }));
             }
             "--verify-known" => {
                 verify_known = true;
@@ -1020,7 +1044,9 @@ fn main() {
                 eprintln!("  --bench <secs>      sieve-only benchmark for <secs> seconds");
                 eprintln!();
                 eprintln!("Verify:");
-                eprintln!("  --verify <k> <n>    verify a single witness with detailed report");
+                eprintln!(
+                    "  --verify <k> <n>    verify a single (k, n) witness (requires k >= 1, n > k)"
+                );
                 eprintln!("  --verify-known      verify all 13 known OEIS A375077 witnesses");
                 std::process::exit(1);
             }
