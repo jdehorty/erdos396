@@ -6,23 +6,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pre-commit-lint.sh",
             "if": "Bash(git commit *)",
-            "timeout": 120,
-            "statusMessage": "Running cargo fmt check + clippy..."
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre-commit-lint.sh",
+            "timeout": 120
           }
         ]
       }
     ],
     "Stop": [
       {
-        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/stop-fmt.sh",
-            "timeout": 30,
-            "statusMessage": "Formatting Rust code..."
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop-fmt.sh",
+            "timeout": 30
           }
         ]
       }
