@@ -15,25 +15,27 @@ pub struct PropertyFailure {
 }
 
 // ---------------------------------------------------------------------------
-// P1: Kummer vs Legendre for v_p(C(2n, n))
+// P1: Legendre self-consistency for v_p(C(2n, n))
 // ---------------------------------------------------------------------------
 
-/// `vp_central_binom_kummer(n, p) == vp_central_binom_legendre(n, p)` for all (n, p).
+/// `vp_central_binom(n, p) == vp_factorial(2n, p) - 2 * vp_factorial(n, p)`
 ///
-/// Catches: Kummer carry-counting bugs.
-pub fn p1_kummer_vs_legendre(n: u64, p: u64, lean: &mut impl Oracle) -> Option<PropertyFailure> {
-    let legendre = lean.vp_central_binom(n, p);
-    // Also query Kummer via VK command if using Lean oracle
-    // For now, just verify Legendre is self-consistent
-    let vf_2n = lean.vp_factorial(2 * n, p);
-    let vf_n = lean.vp_factorial(n, p);
+/// Catches: vp_central_binom implementation bugs in the oracle.
+pub fn p1_legendre_consistency(
+    n: u64,
+    p: u64,
+    oracle: &mut impl Oracle,
+) -> Option<PropertyFailure> {
+    let combined = oracle.vp_central_binom(n, p);
+    let vf_2n = oracle.vp_factorial(2 * n, p);
+    let vf_n = oracle.vp_factorial(n, p);
     let expected = vf_2n - 2 * vf_n;
-    if legendre != expected {
+    if combined != expected {
         Some(PropertyFailure {
             property: "P1: vp_central_binom == vp_factorial(2n) - 2*vp_factorial(n)",
             input: format!("n={}, p={}", n, p),
             expected: format!("{}", expected),
-            actual: format!("{}", legendre),
+            actual: format!("{}", combined),
         })
     } else {
         None
@@ -46,7 +48,7 @@ pub fn p1_kummer_vs_legendre(n: u64, p: u64, lean: &mut impl Oracle) -> Option<P
 
 /// `v_2(C(2n, n)) == popcount(n)` (Kummer's theorem for p=2).
 ///
-/// Catches: popcount shortcut bugs in search-lab's v₂ path.
+/// Catches: vp_central_binom bugs for p=2 in whichever oracle is passed.
 pub fn p2_v2_popcount(n: u64, oracle: &mut impl Oracle) -> Option<PropertyFailure> {
     let supply = oracle.vp_central_binom(n, 2);
     let popcount = n.count_ones() as u64;
@@ -116,56 +118,29 @@ pub fn p4_divisibility(n: u64, p: u64) -> Option<PropertyFailure> {
 }
 
 // ---------------------------------------------------------------------------
-// P5: Barrett reduction correctness
-// ---------------------------------------------------------------------------
-
-/// `Barrett_quotient(n, p) == n / p` for all (n, p).
-///
-/// Catches: Barrett magic constant bugs.
-pub fn p5_barrett(n: u64, p: u64) -> Option<PropertyFailure> {
-    if p < 2 {
-        return None;
-    }
-    let primes = erdos396_search_lab::drt_exports::drt_sieve_primes(p as usize + 1);
-    let pd = erdos396_search_lab::drt_exports::drt_build_prime_data(&primes);
-    // Find the PrimeData for p
-    let pdata = pd.iter().find(|d| d.p == p)?;
-    let barrett_q =
-        erdos396_search_lab::drt_exports::drt_barrett_quotient(n, pdata.magic, pdata.shift);
-    let true_q = n / p;
-    if barrett_q != true_q {
-        Some(PropertyFailure {
-            property: "P5: Barrett_quotient(n, p) == n / p",
-            input: format!("n={}, p={}", n, p),
-            expected: format!("{}", true_q),
-            actual: format!("{}", barrett_q),
-        })
-    } else {
-        None
-    }
-}
-
-// ---------------------------------------------------------------------------
 // P6: Factor stripping correctness
 // ---------------------------------------------------------------------------
 
-/// After `process_prime_dyn(p)`: result has no factor of p, and
-/// original == result * p^(v_p(original)).
+/// After `process_prime_dyn(p)` on a value divisible by p: result has no
+/// factor of p, and `odd_n == result * p^(v_p(odd_n))`.
 ///
 /// Catches: factor stripping bugs in the sieve hot loop.
 pub fn p6_strip_correctness(n: u64, p: u64) -> Option<PropertyFailure> {
     if p < 3 || p % 2 == 0 || n == 0 {
         return None;
     }
+    let odd_n = n >> n.trailing_zeros();
+    // process_prime_dyn assumes it's called at p-stride offsets where the
+    // value is divisible by p. Skip non-divisible inputs.
+    if odd_n % p != 0 {
+        return None;
+    }
+
     let inv_p = erdos396_search_lab::drt_exports::drt_mod_inverse_u64(p);
     let max_quot = u64::MAX / p;
 
-    // Simulate stripping: start with n (odd part), strip all factors of p
-    let odd_n = n >> n.trailing_zeros();
     let mut rem = vec![odd_n];
     let mut start_j = 0u64;
-    // Only strip if the value at offset 0 is divisible by p
-    // We need start_j to be 0 for the strip to touch index 0
     erdos396_search_lab::drt_exports::drt_process_prime_dyn(
         p,
         inv_p,
@@ -204,25 +179,25 @@ pub fn p6_strip_correctness(n: u64, p: u64) -> Option<PropertyFailure> {
 }
 
 // ---------------------------------------------------------------------------
-// P7: Governor sieve residual vs reference
+// P7: Governor agreement
 // ---------------------------------------------------------------------------
 
-/// Governor agreement between two oracles.
+/// Governor agreement between two oracles (both must support `is_governor`).
 ///
-/// Catches: governor membership computation disagreements.
+/// Catches: governor membership computation disagreements between code paths.
 pub fn p7_governor_agreement(
     n: u64,
-    search_lab: &mut impl Oracle,
-    reference: &mut impl Oracle,
+    oracle_a: &mut impl Oracle,
+    oracle_b: &mut impl Oracle,
 ) -> Option<PropertyFailure> {
-    let sl_result = search_lab.is_governor(n);
-    let ref_result = reference.is_governor(n);
-    if sl_result != ref_result {
+    let a_result = oracle_a.is_governor(n);
+    let b_result = oracle_b.is_governor(n);
+    if a_result != b_result {
         Some(PropertyFailure {
-            property: "P7: search-lab governor == reference governor",
+            property: "P7: oracle_a governor == oracle_b governor",
             input: format!("n={}", n),
-            expected: format!("reference={}", ref_result),
-            actual: format!("search-lab={}", sl_result),
+            expected: format!("oracle_a={}", a_result),
+            actual: format!("oracle_b={}", b_result),
         })
     } else {
         None
@@ -233,23 +208,23 @@ pub fn p7_governor_agreement(
 // P8: Witness verification agreement
 // ---------------------------------------------------------------------------
 
-/// `search_lab::exact_check(n, k) == reference::check_witness(k, n)`.
+/// `oracle_a::check_witness(k, n) == oracle_b::check_witness(k, n)`.
 ///
 /// Catches: any disagreement in the full witness verification path.
 pub fn p8_witness_agreement(
     k: u32,
     n: u64,
-    search_lab: &mut impl Oracle,
-    reference: &mut impl Oracle,
+    oracle_a: &mut impl Oracle,
+    oracle_b: &mut impl Oracle,
 ) -> Option<PropertyFailure> {
-    let sl_result = search_lab.check_witness(k, n);
-    let ref_result = reference.check_witness(k, n);
-    if sl_result != ref_result {
+    let a_result = oracle_a.check_witness(k, n);
+    let b_result = oracle_b.check_witness(k, n);
+    if a_result != b_result {
         Some(PropertyFailure {
-            property: "P8: search-lab witness == reference witness",
+            property: "P8: oracle_a witness == oracle_b witness",
             input: format!("k={}, n={}", k, n),
-            expected: format!("reference={}", ref_result),
-            actual: format!("search-lab={}", sl_result),
+            expected: format!("oracle_a={}", a_result),
+            actual: format!("oracle_b={}", b_result),
         })
     } else {
         None

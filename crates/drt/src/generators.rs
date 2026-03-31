@@ -86,18 +86,7 @@ pub fn chunk_boundary(rng: &mut impl Rng, count: usize) -> Vec<TestCase> {
 
 /// Generate n near known witnesses (± small delta for regression testing).
 pub fn near_witnesses(rng: &mut impl Rng) -> Vec<TestCase> {
-    let known: &[(u32, u64)] = &[
-        (1, 2),
-        (2, 2_480),
-        (3, 8_178),
-        (4, 45_153),
-        (5, 3_648_841),
-        (6, 7_979_090),
-        (7, 101_130_029),
-        (8, 339_949_252),
-        (9, 1_019_547_844),
-        (10, 17_609_764_994),
-    ];
+    let known = crate::KNOWN_WITNESSES;
     let mut cases = Vec::new();
     for &(k, witness_n) in known {
         for delta in -100..=100i64 {
@@ -202,7 +191,11 @@ pub fn false_positives() -> Vec<TestCase> {
         }
         // Also test nearby values
         for delta in -5..=5i64 {
-            let n = (end_n as i64 + delta) as u64;
+            let n = if delta >= 0 {
+                end_n.saturating_add(delta as u64)
+            } else {
+                end_n.saturating_sub((-delta) as u64)
+            };
             cases.push(TestCase {
                 k: run_len - 1,
                 n,
@@ -224,9 +217,9 @@ pub fn generate_tier(seed: u64, count: usize, max_n: u64) -> Vec<TestCase> {
     all.extend(near_witnesses(&mut rng));
     all.extend(false_positives());
 
-    // Targeted generators (each gets a proportional share)
+    // 4 targeted generators + uniform random = 5 equal shares
     let remaining = count.saturating_sub(all.len());
-    let per_gen = remaining / 6;
+    let per_gen = remaining / 5;
 
     all.extend(block_boundary(&mut rng, per_gen));
     all.extend(chunk_boundary(&mut rng, per_gen));

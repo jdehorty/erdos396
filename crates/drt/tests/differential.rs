@@ -6,6 +6,7 @@
 use erdos396_drt::generators;
 use erdos396_drt::oracle::{Erdos396Oracle, LeanOracle, Oracle, SearchLabOracle};
 use erdos396_drt::properties::*;
+use erdos396_drt::KNOWN_WITNESSES;
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -22,20 +23,7 @@ fn t0_known_witnesses_search_lab_vs_erdos396() {
     let mut sl = SearchLabOracle::new();
     let mut e3 = Erdos396Oracle::new(25_000_000_000_000);
 
-    let known: &[(u32, u64)] = &[
-        (1, 2),
-        (2, 2_480),
-        (3, 8_178),
-        (4, 45_153),
-        (5, 3_648_841),
-        (6, 7_979_090),
-        (7, 101_130_029),
-        (8, 339_949_252),
-        (9, 1_019_547_844),
-        (10, 17_609_764_994),
-    ];
-
-    for &(k, n) in known {
+    for &(k, n) in KNOWN_WITNESSES {
         let sl_result = sl.check_witness(k, n);
         let e3_result = e3.check_witness(k, n);
         assert!(
@@ -179,20 +167,46 @@ fn t0_p5_barrett() {
     }
 }
 
+/// P6 smoke: factor stripping correctness for small primes.
+#[test]
+fn t0_p6_strip_correctness() {
+    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+    let test_primes: &[u64] = &[3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47];
+
+    for &p in test_primes {
+        // Test known prime powers: p^1, p^2, ..., p^k
+        let mut power = p;
+        for _ in 0..10 {
+            if let Some(f) = p6_strip_correctness(power, p) {
+                panic!("{:?}", f);
+            }
+            if power > 1_000_000_000_000 / p {
+                break;
+            }
+            power *= p;
+        }
+        // Test random multiples of p
+        for _ in 0..50 {
+            let mult: u64 = rand::Rng::gen_range(&mut rng, 1..=1_000_000_000u64);
+            let n = mult * p;
+            if let Some(f) = p6_strip_correctness(n, p) {
+                panic!("{:?}", f);
+            }
+        }
+    }
+}
+
 /// P7 smoke: governor agreement — erdos396 is_governor vs is_governor_fast.
 #[test]
 fn t0_p7_governor_agreement() {
     let mut e3 = Erdos396Oracle::new(25_000_000_000_000);
 
-    // Test governor status around known witnesses using erdos396 library
-    // (which has both is_governor and is_governor_fast code paths)
     let test_points: &[u64] = &[1, 2, 3, 100, 1000, 2480, 8178, 45153, 3_648_841, 7_979_090];
 
     for &n in test_points {
         for delta in -5..=5i64 {
             let test_n = (n as i64 + delta).max(1) as u64;
             let result = e3.is_governor(test_n);
-            // Also cross-check with the fast path
             let checker = erdos396::GovernorChecker::new(test_n);
             let fast_result = checker.is_governor_fast(test_n);
             assert_eq!(
@@ -230,30 +244,26 @@ fn t0_false_positive_rejection() {
 // T1: Standard tests — includes Lean oracle, < 60 seconds
 // ===================================================================
 
+fn require_lean_oracle() -> LeanOracle {
+    match LeanOracle::new() {
+        Some(oracle) => oracle,
+        None => {
+            panic!(
+                "Lean oracle binary not found. Build with: cd formal && lake build erdos396ffi\n\
+                 Or set LEAN_ORACLE_PATH to the binary location."
+            );
+        }
+    }
+}
+
 /// D2: search-lab vs Lean oracle on known witnesses.
 #[test]
 #[ignore] // T1: run with `cargo test -- --ignored`
 fn t1_known_witnesses_search_lab_vs_lean() {
     let mut sl = SearchLabOracle::new();
-    let Some(mut lean) = LeanOracle::new() else {
-        eprintln!("Lean oracle not available — skipping");
-        return;
-    };
+    let mut lean = require_lean_oracle();
 
-    let known: &[(u32, u64)] = &[
-        (1, 2),
-        (2, 2_480),
-        (3, 8_178),
-        (4, 45_153),
-        (5, 3_648_841),
-        (6, 7_979_090),
-        (7, 101_130_029),
-        (8, 339_949_252),
-        (9, 1_019_547_844),
-        (10, 17_609_764_994),
-    ];
-
-    for &(k, n) in known {
+    for &(k, n) in KNOWN_WITNESSES {
         let sl_result = sl.check_witness(k, n);
         let lean_result = lean.check_witness(k, n);
         assert_eq!(
@@ -270,10 +280,7 @@ fn t1_known_witnesses_search_lab_vs_lean() {
 #[ignore]
 fn t1_differential_search_lab_vs_lean_random() {
     let mut sl = SearchLabOracle::new();
-    let Some(mut lean) = LeanOracle::new() else {
-        eprintln!("Lean oracle not available — skipping");
-        return;
-    };
+    let mut lean = require_lean_oracle();
 
     let cases = generators::generate_tier(SEED, 10_000, 10_000_000_000);
     let mut failures = Vec::new();
@@ -306,14 +313,11 @@ fn t1_differential_search_lab_vs_lean_random() {
     );
 }
 
-/// P1: Kummer vs Legendre agreement via Lean oracle.
+/// P1: Legendre self-consistency via Lean oracle.
 #[test]
 #[ignore]
-fn t1_p1_kummer_vs_legendre() {
-    let Some(mut lean) = LeanOracle::new() else {
-        eprintln!("Lean oracle not available — skipping");
-        return;
-    };
+fn t1_p1_legendre_consistency() {
+    let mut lean = require_lean_oracle();
 
     let mut rng = ChaCha8Rng::seed_from_u64(SEED);
     let primes: &[u64] = &[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47];
@@ -321,7 +325,7 @@ fn t1_p1_kummer_vs_legendre() {
     for _ in 0..2_000 {
         let n: u64 = rand::Rng::gen_range(&mut rng, 1..=10_000_000_000u64);
         for &p in primes {
-            if let Some(f) = p1_kummer_vs_legendre(n, p, &mut lean) {
+            if let Some(f) = p1_legendre_consistency(n, p, &mut lean) {
                 panic!("{:?}", f);
             }
         }
@@ -334,10 +338,7 @@ fn t1_p1_kummer_vs_legendre() {
 fn t1_triple_oracle_agreement() {
     let mut sl = SearchLabOracle::new();
     let mut e3 = Erdos396Oracle::new(25_000_000_000_000);
-    let Some(mut lean) = LeanOracle::new() else {
-        eprintln!("Lean oracle not available — skipping");
-        return;
-    };
+    let mut lean = require_lean_oracle();
 
     let cases = generators::generate_tier(SEED + 1, 5_000, 10_000_000_000);
     let mut failures = Vec::new();

@@ -17,6 +17,7 @@ a small binary.
 * `vpCentralBinom`       — v_p(C(2n,n)) via Legendre
 * `vpCentralBinomKummer` — v_p(C(2n,n)) via carry counting (Kummer's theorem)
 * `isqrt`                — Integer square root
+* `vp`                   — v_p(m): p-adic valuation of m
 * `isGovernor`           — Governor Set membership: n | C(2n, n)
 * `checkWitness`         — Witness check: n(n-1)...(n-k) | C(2n, n)
 -/
