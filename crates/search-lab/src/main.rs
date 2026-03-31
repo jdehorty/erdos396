@@ -1264,6 +1264,12 @@ pub mod drt_exports {
         w_block: u64,
         rem: &mut [u64],
     ) {
+        assert!(
+            w_block as usize <= rem.len(),
+            "w_block ({}) exceeds rem length ({})",
+            w_block,
+            rem.len()
+        );
         process_prime_dyn(p, inv_p, max_quot, start_j, w_block, rem.as_mut_ptr());
     }
 }

@@ -43,8 +43,13 @@ pub fn block_boundary(rng: &mut impl Rng, count: usize) -> Vec<TestCase> {
             let k = rng.gen_range(1..=14u32);
             let block_idx = rng.gen_range(1..=1_000_000u64);
             let delta = deltas[rng.gen_range(0..deltas.len())];
-            let n = (block_idx * block_size).wrapping_add(delta as u64);
-            let n = n.max(k as u64 + 1);
+            let base = block_idx * block_size;
+            let n = if delta >= 0 {
+                base.saturating_add(delta as u64)
+            } else {
+                base.saturating_sub((-delta) as u64)
+            };
+            let n = n.clamp(k as u64 + 1, MAX_SAFE_N);
             TestCase {
                 k,
                 n,
@@ -63,8 +68,13 @@ pub fn chunk_boundary(rng: &mut impl Rng, count: usize) -> Vec<TestCase> {
             let k = rng.gen_range(1..=14u32);
             let chunk_idx = rng.gen_range(1..=25_000_000u64);
             let delta = deltas[rng.gen_range(0..deltas.len())];
-            let n = (chunk_idx * chunk_size).wrapping_add(delta as u64);
-            let n = n.max(k as u64 + 1);
+            let base = chunk_idx * chunk_size;
+            let n = if delta >= 0 {
+                base.saturating_add(delta as u64)
+            } else {
+                base.saturating_sub((-delta) as u64)
+            };
+            let n = n.clamp(k as u64 + 1, MAX_SAFE_N);
             TestCase {
                 k,
                 n,

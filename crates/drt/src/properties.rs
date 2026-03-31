@@ -207,9 +207,9 @@ pub fn p6_strip_correctness(n: u64, p: u64) -> Option<PropertyFailure> {
 // P7: Governor sieve residual vs reference
 // ---------------------------------------------------------------------------
 
-/// search-lab sieve residual == 1 ⟺ erdos396::is_governor(n).
+/// Governor agreement between two oracles.
 ///
-/// Catches: governor sieve vs factorization-based reference disagreements.
+/// Catches: governor membership computation disagreements.
 pub fn p7_governor_agreement(
     n: u64,
     search_lab: &mut impl Oracle,

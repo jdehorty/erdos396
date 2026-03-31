@@ -67,7 +67,12 @@ impl Oracle for Erdos396Oracle {
     }
 
     fn check_witness(&mut self, k: u32, n: u64) -> bool {
-        self.verifier.is_witness(k, n).unwrap_or(false)
+        self.verifier.is_witness(k, n).unwrap_or_else(|e| {
+            panic!(
+                "Erdos396Oracle::check_witness failed for k={}, n={}: {:?}",
+                k, n, e
+            )
+        })
     }
 }
 
@@ -199,23 +204,42 @@ impl LeanOracle {
         })
     }
 
-    fn query(&mut self, cmd: &str) -> Option<String> {
-        writeln!(self.stdin, "{}", cmd).ok()?;
-        self.stdin.flush().ok()?;
+    fn query(&mut self, cmd: &str) -> String {
+        writeln!(self.stdin, "{}", cmd).unwrap_or_else(|e| {
+            panic!(
+                "Lean oracle: write failed for '{}': {} (subprocess may have died)",
+                cmd, e
+            )
+        });
+        self.stdin
+            .flush()
+            .unwrap_or_else(|e| panic!("Lean oracle: flush failed for '{}': {}", cmd, e));
         let mut line = String::new();
-        self.reader.read_line(&mut line).ok()?;
+        let bytes = self
+            .reader
+            .read_line(&mut line)
+            .unwrap_or_else(|e| panic!("Lean oracle: read failed for '{}': {}", cmd, e));
+        if bytes == 0 {
+            panic!(
+                "Lean oracle: subprocess died (EOF) while processing '{}'",
+                cmd
+            );
+        }
         let trimmed = line.trim().to_string();
         if trimmed == "ERR" {
-            None
-        } else {
-            Some(trimmed)
+            panic!("Lean oracle: returned ERR for '{}'", cmd);
         }
+        trimmed
     }
 
     fn query_u64(&mut self, cmd: &str) -> u64 {
-        self.query(cmd)
-            .and_then(|s| s.parse().ok())
-            .expect("Lean oracle returned invalid response")
+        let response = self.query(cmd);
+        response.parse().unwrap_or_else(|e| {
+            panic!(
+                "Lean oracle: unparseable response '{}' for '{}': {}",
+                response, cmd, e
+            )
+        })
     }
 
     fn query_bool(&mut self, cmd: &str) -> bool {
