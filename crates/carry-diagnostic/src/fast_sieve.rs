@@ -772,7 +772,8 @@ mod tests {
         let primes = erdos396::PrimeSieve::for_range(lo + len as u64 + 100);
         let prime_data = build_prime_data(primes.primes());
 
-        let fused = FusedBatchResult::compute(lo, len, primes.primes());
+        let erdos_prime_data = erdos396::build_prime_data(primes.primes());
+        let fused = FusedBatchResult::compute(lo, len, &erdos_prime_data);
         let fast = fast_governor_sieve(lo, len, &prime_data);
 
         for i in 0..len {
@@ -791,7 +792,8 @@ mod tests {
         let primes = erdos396::PrimeSieve::for_range(lo + len as u64 + 100);
         let prime_data = build_prime_data(primes.primes());
 
-        let fused = erdos396::prefilter::FusedBatchResult::compute(lo, len, primes.primes());
+        let erdos_prime_data = erdos396::build_prime_data(primes.primes());
+        let fused = erdos396::prefilter::FusedBatchResult::compute(lo, len, &erdos_prime_data);
         let fast = fast_governor_sieve(lo, len, &prime_data);
 
         for i in 0..len {

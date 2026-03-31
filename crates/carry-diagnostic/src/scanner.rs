@@ -311,4 +311,32 @@ mod tests {
         let has_40664 = results.iter().any(|nm| nm.n == 40664);
         assert!(has_40664, "Should find the known k=2 non-governor witness at n=40664");
     }
+
+    #[test]
+    fn test_scan_finds_known_k3_non_governor_witness() {
+        // n=1441378 is a known k=3 non-governor witness
+        let n = 1_441_378u64;
+        let k = 3u32;
+        let start = n - 500;
+        let count = 1000u64;
+        let sieve = PrimeSieve::for_range(start + count + 100);
+
+        let results = scan_near_misses(start, count, k, sieve.primes(), &sieve, false);
+        let found = results.iter().any(|nm| nm.n == n);
+        assert!(found, "Should find the known k=3 non-governor witness at n={n}");
+    }
+
+    #[test]
+    fn test_scan_finds_known_k4_non_governor_witness() {
+        // n=2366563 is a known k=4 non-governor witness
+        let n = 2_366_563u64;
+        let k = 4u32;
+        let start = n - 500;
+        let count = 1000u64;
+        let sieve = PrimeSieve::for_range(start + count + 100);
+
+        let results = scan_near_misses(start, count, k, sieve.primes(), &sieve, false);
+        let found = results.iter().any(|nm| nm.n == n);
+        assert!(found, "Should find the known k=4 non-governor witness at n={n}");
+    }
 }

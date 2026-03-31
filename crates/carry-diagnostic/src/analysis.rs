@@ -395,6 +395,73 @@ mod tests {
     }
 
     #[test]
+    fn test_known_k3_non_governor_witness_analysis() {
+        // n=1441378 is a known k=3 non-governor witness.
+        // The block [n-3, n] should contain exactly one non-governor whose
+        // failures are confined to barrier primes (p < 2*3+1 = 7), i.e. {2, 3, 5}.
+        let n = 1_441_378u64;
+        let k = 3u32;
+        let sieve = erdos396::PrimeSieve::for_range(n + 100);
+        let checker = erdos396::GovernorChecker::with_sieve(sieve.clone());
+
+        // Find the non-governor in the block
+        let mut non_gov_pos = None;
+        for j in 0..=k {
+            let m = n - j as u64;
+            if !checker.is_governor_fast(m) {
+                assert!(non_gov_pos.is_none(), "Block should have exactly one non-governor");
+                non_gov_pos = Some(j);
+            }
+        }
+        let j = non_gov_pos.expect("Block must contain a non-governor");
+        let m = n - j as u64;
+
+        // Verify it's a pure barrier failure
+        assert!(is_pure_barrier_failure(m, k, &sieve),
+            "k=3 non-governor witness m={m} should be a pure barrier failure");
+
+        // Full near-miss report
+        let nm = NearMiss { n, m, j };
+        let report = analyze_near_miss(&nm, k, &sieve);
+        assert!(report.pure_barrier_only);
+        assert!(report.failing_prime_count > 0,
+            "Non-governor must fail at least one barrier prime");
+    }
+
+    #[test]
+    fn test_known_k4_non_governor_witness_analysis() {
+        // n=2366563 is a known k=4 non-governor witness.
+        // Barrier primes for k=4: {2, 3, 5, 7} (primes < 2*4+1 = 9).
+        let n = 2_366_563u64;
+        let k = 4u32;
+        let sieve = erdos396::PrimeSieve::for_range(n + 100);
+        let checker = erdos396::GovernorChecker::with_sieve(sieve.clone());
+
+        // Find the non-governor in the block
+        let mut non_gov_pos = None;
+        for j in 0..=k {
+            let m = n - j as u64;
+            if !checker.is_governor_fast(m) {
+                assert!(non_gov_pos.is_none(), "Block should have exactly one non-governor");
+                non_gov_pos = Some(j);
+            }
+        }
+        let j = non_gov_pos.expect("Block must contain a non-governor");
+        let m = n - j as u64;
+
+        // Verify it's a pure barrier failure
+        assert!(is_pure_barrier_failure(m, k, &sieve),
+            "k=4 non-governor witness m={m} should be a pure barrier failure");
+
+        // Full near-miss report
+        let nm = NearMiss { n, m, j };
+        let report = analyze_near_miss(&nm, k, &sieve);
+        assert!(report.pure_barrier_only);
+        assert!(report.failing_prime_count > 0,
+            "Non-governor must fail at least one barrier prime");
+    }
+
+    #[test]
     fn test_proposition2_is_candidate() {
         let sieve = erdos396::PrimeSieve::for_range(100);
         let nm = NearMiss { n: 5, m: 4, j: 1 };
