@@ -734,6 +734,231 @@ fn solve(
 }
 
 // ---------------------------------------------------------------------------
+// Known witnesses — OEIS A375077
+// ---------------------------------------------------------------------------
+const KNOWN_WITNESSES: &[(u64, u64)] = &[
+    (1, 2),
+    (2, 2_480),
+    (3, 8_178),
+    (4, 45_153),
+    (5, 3_648_841),
+    (6, 7_979_090),
+    (7, 101_130_029),
+    (8, 339_949_252),
+    (9, 1_019_547_844),
+    (10, 17_609_764_994),
+    (11, 1_070_858_041_585),
+    (12, 5_048_891_644_646),
+    (13, 18_253_129_921_842),
+];
+
+// ---------------------------------------------------------------------------
+// Verify — detailed witness verification
+// ---------------------------------------------------------------------------
+
+/// Verify a single (k, n) witness with a detailed per-prime report.
+fn verify_witness(k: u64, n: u64, prime_data: &[PrimeData]) -> bool {
+    if k == 0 || n <= k {
+        eprintln!(
+            "Error: --verify requires k >= 1 and n > k (got k={}, n={})",
+            k, n
+        );
+        return false;
+    }
+
+    let two_k = 2 * k;
+    let two_n = 2 * n;
+    let mut all_pass = true;
+
+    println!("Verifying k={}, n={}", k, n);
+    println!();
+
+    // p=2: v_2(C(2n,n)) >= v_2(n!/(n-k-1)!) via Kummer/popcount.
+    // Demand = v_2(n!/(n-k-1)!) = (popcount(n-k-1) - popcount(n) + k+1).
+    // Wrapping arithmetic is correct here: the formula is evaluated mod 2^64
+    // and the final comparison supply >= demand holds iff the true (signed)
+    // demand is non-negative and at most supply. When the true value is
+    // negative, wrapping produces a large u64 that fails supply >= demand,
+    // giving the correct PASS result.
+    {
+        let supply = n.count_ones() as u64;
+        let nk1_ones = (n - k - 1).count_ones() as u64;
+        let demand = nk1_ones.wrapping_sub(supply).wrapping_add(k + 1);
+        let pass = supply >= demand;
+        let status = if pass { "PASS" } else { "FAIL" };
+        println!(
+            "  p=2:  supply(popcount)={}, demand={} [{}]",
+            supply, demand, status
+        );
+        if !pass {
+            all_pass = false;
+        }
+    }
+
+    // Barrier primes p in (2, 2k]
+    for pd in prime_data {
+        let p = pd.p;
+        if p == 2 {
+            continue;
+        }
+        if p > two_k {
+            break;
+        }
+        let nk1 = n - k - 1;
+        let (mut demand, mut supply, mut pw) = (0u64, 0u64, p);
+        loop {
+            let vn = n / pw;
+            demand += vn - nk1 / pw;
+            supply += two_n / pw - (vn << 1);
+            if pw > two_n / p {
+                break;
+            }
+            pw *= p;
+        }
+        let pass = demand <= supply;
+        let status = if pass { "PASS" } else { "FAIL" };
+        println!(
+            "  p={}: supply={}, demand={} [{}]",
+            p, supply, demand, status
+        );
+        if !pass {
+            all_pass = false;
+        }
+    }
+
+    // Per-element large prime check
+    let mut large_prime_ok = true;
+    for i in 0..=k {
+        let ni = n - i;
+        let mut temp = ni;
+        temp >>= temp.trailing_zeros();
+
+        for pd in prime_data {
+            let p = pd.p;
+            if p == 2 {
+                continue;
+            }
+            if p <= two_k {
+                let mut q = temp.wrapping_mul(pd.inv_p);
+                while q <= pd.max_quot {
+                    temp = q;
+                    q = temp.wrapping_mul(pd.inv_p);
+                }
+                continue;
+            }
+
+            if p * p > temp {
+                if temp > two_k {
+                    let p_val = temp;
+                    let mut nu_prod = 1u64;
+                    let mut t2 = ni / p_val;
+                    while t2 > 0 && t2 % p_val == 0 {
+                        nu_prod += 1;
+                        t2 /= p_val;
+                    }
+                    let mut nu_comb = 0u64;
+                    let mut power = p_val;
+                    loop {
+                        let v_n = n / power;
+                        nu_comb += two_n / power - 2 * v_n;
+                        if power > two_n / p_val {
+                            break;
+                        }
+                        power *= p_val;
+                    }
+                    if nu_prod > nu_comb {
+                        println!(
+                            "  n-{}={}: large prime p={}, demand={} > supply={} [FAIL]",
+                            i, ni, p_val, nu_prod, nu_comb
+                        );
+                        large_prime_ok = false;
+                    }
+                }
+                break;
+            }
+
+            let q = temp.wrapping_mul(pd.inv_p);
+            if q <= pd.max_quot {
+                let mut nu_prod = 0u64;
+                let mut q2 = q;
+                loop {
+                    nu_prod += 1;
+                    temp = q2;
+                    q2 = temp.wrapping_mul(pd.inv_p);
+                    if q2 > pd.max_quot {
+                        break;
+                    }
+                }
+                let mut nu_comb = 0u64;
+                let mut power = p;
+                loop {
+                    let v_n = n / power;
+                    nu_comb += two_n / power - 2 * v_n;
+                    if power > two_n / p {
+                        break;
+                    }
+                    power *= p;
+                }
+                if nu_prod > nu_comb {
+                    println!(
+                        "  n-{}={}: prime p={}, demand={} > supply={} [FAIL]",
+                        i, ni, p, nu_prod, nu_comb
+                    );
+                    large_prime_ok = false;
+                }
+            }
+        }
+    }
+
+    if large_prime_ok {
+        println!("  large primes: all block terms pass [PASS]");
+    }
+    all_pass = all_pass && large_prime_ok;
+
+    println!();
+    if all_pass {
+        println!("RESULT: k={}, n={} is a VALID witness", k, n);
+    } else {
+        println!("RESULT: k={}, n={} is NOT a valid witness", k, n);
+    }
+
+    all_pass
+}
+
+/// Verify all known OEIS A375077 witnesses.
+/// Uses exact_check (the search-path function) for speed rather than the
+/// verbose verify_witness. This is intentional: batch mode prints one line
+/// per witness, not a full per-prime report.
+fn verify_all_known(prime_data: &[PrimeData]) -> bool {
+    println!("Verifying all known OEIS A375077 witnesses...\n");
+    let mut all_pass = true;
+    for &(k, n) in KNOWN_WITNESSES {
+        debug_assert!(
+            k > 0 && n > k,
+            "KNOWN_WITNESSES entry ({}, {}) violates n > k",
+            k,
+            n
+        );
+        let pass = exact_check(n, k, prime_data);
+        let status = if pass { "PASS" } else { "FAIL" };
+        println!("  k={:2}, n={:>20}: {}", k, n, status);
+        if !pass {
+            all_pass = false;
+        }
+    }
+    println!();
+    if all_pass {
+        println!(
+            "All {} known witnesses verified successfully.",
+            KNOWN_WITNESSES.len()
+        );
+    } else {
+        println!("SOME WITNESSES FAILED VERIFICATION.");
+    }
+    all_pass
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 fn main() {
@@ -745,6 +970,9 @@ fn main() {
     let mut run_log: u64 = 10;
     let mut progress = false;
     let mut bench_secs: f64 = 0.0;
+    let mut verify_k: Option<u64> = None;
+    let mut verify_n: Option<u64> = None;
+    let mut verify_known = false;
     let mut n_threads = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(1);
@@ -783,15 +1011,69 @@ fn main() {
                 i += 1;
                 bench_secs = args[i].parse().unwrap();
             }
+            "--verify" => {
+                if i + 2 >= args.len() {
+                    eprintln!("Error: --verify requires two arguments: --verify <k> <n>");
+                    std::process::exit(1);
+                }
+                i += 1;
+                verify_k = Some(args[i].parse().unwrap_or_else(|e| {
+                    eprintln!("Error: invalid k value '{}': {}", args[i], e);
+                    std::process::exit(1);
+                }));
+                i += 1;
+                verify_n = Some(args[i].parse().unwrap_or_else(|e| {
+                    eprintln!("Error: invalid n value '{}': {}", args[i], e);
+                    std::process::exit(1);
+                }));
+            }
+            "--verify-known" => {
+                verify_known = true;
+            }
             _ => {
+                eprintln!("Usage: {} [options]", args[0]);
+                eprintln!();
+                eprintln!("Search:");
+                eprintln!("  -k <k>              starting k value (default: 1)");
+                eprintln!("  --start <n>         search range start (default: 1)");
+                eprintln!("  --end <n>           search range end (default: inf)");
+                eprintln!("  --kmax <k>          maximum k value (default: 20)");
+                eprintln!("  --threads <t>       worker thread count (default: all cores)");
+                eprintln!("  --run-log <n>       run-length logging threshold (default: 10)");
+                eprintln!("  --progress          print throughput stats to stderr");
+                eprintln!("  --bench <secs>      sieve-only benchmark for <secs> seconds");
+                eprintln!();
+                eprintln!("Verify:");
                 eprintln!(
-                    "Usage: {} [-k K] [--start N] [--end N] [--kmax KMAX] [--threads T] [--run-log N] [--progress] [--bench SECS]",
-                    args[0]
+                    "  --verify <k> <n>    verify a single (k, n) witness (requires k >= 1, n > k)"
                 );
+                eprintln!("  --verify-known      verify all 13 known OEIS A375077 witnesses");
                 std::process::exit(1);
             }
         }
         i += 1;
+    }
+
+    // Handle verify modes early — no search needed
+    if verify_known || verify_k.is_some() {
+        let t0 = Instant::now();
+        let primes = sieve_primes(200_000_000);
+        let prime_data = build_prime_data(&primes);
+        eprintln!(
+            "# primes: {} in {:.3}s",
+            primes.len(),
+            t0.elapsed().as_secs_f64()
+        );
+
+        if verify_known {
+            let pass = verify_all_known(&prime_data);
+            std::process::exit(if pass { 0 } else { 1 });
+        }
+
+        if let (Some(k), Some(n)) = (verify_k, verify_n) {
+            let pass = verify_witness(k, n, &prime_data);
+            std::process::exit(if pass { 0 } else { 1 });
+        }
     }
 
     let end_str = if end_l == u64::MAX {

@@ -3,7 +3,7 @@ name = "erdos396"
 version = "1.0.0"
 edition = "2021"
 authors = ["Erdős 396 Research Team"]
-description = "High-performance search for Erdős Problem #396 witnesses via Governor Set analysis"
+description = "Core mathematical library for Erdős Problem #396 — governor set analysis, prime sieves, and witness verification"
 license = "MIT"
 repository = "https://github.com/jdehorty/erdos396"
 keywords = ["number-theory", "erdos", "combinatorics", "parallel"]
@@ -13,37 +13,8 @@ categories = ["mathematics", "science"]
 name = "erdos396"
 path = "src/lib.rs"
 
-[[bin]]
-name = "erdos396"
-path = "src/main.rs"
-
-[[bin]]
-name = "verify"
-path = "src/bin/verify.rs"
-
-[[bin]]
-name = "validate"
-path = "src/bin/validate.rs"
-
-[[bin]]
-name = "audit_runs"
-path = "src/bin/audit_runs.rs"
-
-[[bin]]
-name = "build_run_corpus"
-path = "src/bin/build_run_corpus.rs"
-
-[[bin]]
-name = "classify_run_windows"
-path = "src/bin/classify_run_windows.rs"
-
-[[bin]]
-name = "query_run_windows"
-path = "src/bin/query_run_windows.rs"
-
-[[bin]]
-name = "analyze_false_positives"
-path = "src/bin/analyze_false_positives.rs"
+# Binaries have been archived to the archive/erdos396-monolith branch.
+# The library is retained as a dependency for carry-diagnostic and tests.
 
 [dependencies]
 # Parallelism
@@ -53,14 +24,14 @@ num_cpus = "1.16"
 # Small vector optimization
 smallvec = "1.13"
 
-# CLI
+# CLI (used by archived binaries; not consumed by the library itself)
 clap = { version = "4.4", features = ["derive"] }
 
 # Serialization for checkpoints
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Columnar storage
+# Columnar storage (used by run_collection module)
 arrow = "54.2"
 parquet = { version = "54.2", features = ["arrow"] }
 walkdir = "2.5"
@@ -79,5 +50,5 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
 anyhow = "1.0"
 
-# Temp dirs (used by bench mode to avoid polluting real output dir)
+# Temp dirs
 tempfile = "3.10"
