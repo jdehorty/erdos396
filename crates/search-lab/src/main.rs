@@ -1,4 +1,4 @@
-// erdos396-speed-rust — Highly optimized Rust port of the C++ witness search.
+// erdos396-search-lab — Highly optimized Rust witness search for Erdős Problem #396.
 //
 // Build: cargo build --release
 
@@ -9,7 +9,7 @@ use std::time::Instant;
 
 type Prime = u64;
 
-const CHUNK_SIZE: u64 = 1_048_576; // 1M — matches C++ reference
+const CHUNK_SIZE: u64 = 1_048_576; // 1M — shared with C++ implementation for parity
 const BLOCK_SIZE: u32 = 32768;
 const BLOCK_SHIFT: u32 = 15;
 const BLOCK_MASK: u32 = 0x7FFF;
@@ -154,7 +154,7 @@ fn isqrt_u64(n: u64) -> u64 {
 
 // ---------------------------------------------------------------------------
 // process_prime<P> — const-generic strip with offset tracking
-// Matches C++ process_prime_p<p>: strips ALL factors of P from rem[j],
+// Const-generic strip: strips ALL factors of P from rem[j],
 // stepping by P, and updates start_j for next block.
 // ---------------------------------------------------------------------------
 #[inline(always)]
@@ -397,7 +397,7 @@ fn write_checkpoint(k: u64, l_batch: u64) {
 }
 
 // ---------------------------------------------------------------------------
-// Solver — bucketed sieve architecture matching C++ reference
+// Solver — bucketed sieve architecture (shared design with C++ implementation)
 // ---------------------------------------------------------------------------
 #[allow(clippy::too_many_arguments)] // mirrors worker/bench CLI wiring
 fn solve(
@@ -895,7 +895,7 @@ mod tests {
     /// Known-good first witnesses for k=1..11 over [1, 18_000_000_000].
     ///
     /// This is the "standard candle" test: deterministic, covers the full
-    /// sieve + exact_check pipeline, and matches the C++ reference output.
+    /// sieve + exact_check pipeline, verified against the C++ implementation.
     ///
     /// Expected R-line results:
     ///   k=1  → 2
@@ -1140,6 +1140,279 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // build_prime_data: Barrett magic constants must produce correct quotients.
+    // A wrong magic → wrong initial offset → primes skip values in a block.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn barrett_magic_produces_correct_quotients() {
+        let primes = sieve_primes(200_000_000);
+        let prime_data = build_prime_data(&primes);
+
+        // Test Barrett floor(n / p) at a variety of offsets across the search range.
+        // The Barrett quotient is: ((n as u128 * magic as u128) >> 64) >> shift
+        let test_offsets: &[u64] = &[
+            0, 1, 100, CHUNK_SIZE, 1_000_000_000, 10_000_000_000, 100_000_000_000,
+            u64::MAX / 2, u64::MAX - 1,
+        ];
+
+        for pd in prime_data.iter().skip(1) {
+            // skip p=2 (inv_p=0)
+            let p = pd.p;
+            for &base in test_offsets {
+                let n = base.wrapping_add(p).wrapping_sub(1); // n = base + p - 1
+                if n < p {
+                    continue;
+                }
+                let barrett_q =
+                    (((n as u128).wrapping_mul(pd.magic as u128)) >> 64) as u64 >> pd.shift as u64;
+                let true_q = n / p;
+                assert_eq!(
+                    barrett_q, true_q,
+                    "Barrett quotient wrong for p={}, n={}: got {} expected {}",
+                    p, n, barrett_q, true_q
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // process_prime: verify stripping removes ALL factors across higher powers
+    // (p^2, p^3, p^4) and multiple primes in sequence.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn process_prime_strips_higher_powers() {
+        // For p=3: values like 27=3^3, 81=3^4, 243=3^5 should be fully stripped to 1
+        let primes_to_test: &[u64] = &[3, 5, 7, 11, 13];
+        for &p in primes_to_test {
+            let inv_p = mod_inverse_u64(p);
+            let max_quot = u64::MAX / p;
+
+            // Build a buffer with known prime powers at specific positions
+            let block_size = 256u64;
+            let block_start = p * 1000; // aligned start for easy offset math
+            let mut rem = vec![0u64; block_size as usize];
+            for j in 0..block_size {
+                let x = block_start + j;
+                rem[j as usize] = x >> x.trailing_zeros(); // strip factor-of-2
+            }
+
+            let mut sj = 0u64; // block_start is a multiple of p
+            process_prime_dyn(p, inv_p, max_quot, &mut sj, block_size, rem.as_mut_ptr());
+
+            // After stripping, every position divisible by p should have no factor of p left
+            for j in 0..block_size {
+                let x = block_start + j;
+                if x % p == 0 {
+                    let r = rem[j as usize];
+                    assert!(
+                        r % p != 0 || r == 0,
+                        "p={}: position {} (value {}) still has factor of p after strip, rem={}",
+                        p, j, x, r
+                    );
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-prime sequential stripping: after processing all small primes,
+    // smooth numbers should reduce to 1.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn multi_prime_strip_smooth_numbers_reduce_to_one() {
+        let primes = sieve_primes(1000);
+        let prime_data = build_prime_data(&primes);
+
+        let block_start = 1_000_000u64;
+        let block_size = 1024u64;
+        let mut rem = vec![0u64; block_size as usize];
+        for j in 0..block_size {
+            let x = block_start + j;
+            rem[j as usize] = x >> x.trailing_zeros();
+        }
+
+        // Process all odd primes up to sqrt(2 * (block_start + block_size))
+        let limit = isqrt_u64(2 * (block_start + block_size));
+        for pd in prime_data.iter().skip(1) {
+            if pd.p > limit {
+                break;
+            }
+            let mut sj = block_start % pd.p;
+            if sj != 0 {
+                sj = pd.p - sj;
+            }
+            process_prime_dyn(pd.p, pd.inv_p, pd.max_quot, &mut sj, block_size, rem.as_mut_ptr());
+        }
+
+        // Numbers whose only prime factors are <= limit should now be 1.
+        // Others should have a residual > 1 (the large prime factor).
+        for j in 0..block_size {
+            let x = block_start + j;
+            let odd = x >> x.trailing_zeros();
+            // Factor odd to check if it's smooth
+            let mut temp = odd;
+            for pd in prime_data.iter().skip(1) {
+                if pd.p > limit {
+                    break;
+                }
+                while temp % pd.p == 0 {
+                    temp /= pd.p;
+                }
+            }
+            let is_smooth = temp == 1;
+            if is_smooth {
+                assert_eq!(
+                    rem[j as usize], 1,
+                    "Smooth number x={} (odd={}) should reduce to 1, got {}",
+                    x, odd, rem[j as usize]
+                );
+            } else {
+                assert!(
+                    rem[j as usize] > 1,
+                    "Non-smooth x={} should have residual > 1, got {}",
+                    x, rem[j as usize]
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // exact_check Part 3: large prime factor path.
+    // Test with values known to have exactly one large prime factor.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn exact_check_rejects_large_prime_deficiency() {
+        let primes = sieve_primes(200_000_000);
+        let prime_data = build_prime_data(&primes);
+
+        // For a governor run to exist, v_p must not exceed supply for any p.
+        // We test that exact_check correctly rejects when a large prime factor
+        // of some (n-i) has a p-adic valuation exceeding v_p(C(2n,n)).
+        //
+        // n=100, k=3: not a witness — should fail exact_check
+        assert!(!exact_check(100, 3, &prime_data));
+        // n=200, k=5: not a witness
+        assert!(!exact_check(200, 5, &prime_data));
+        // n=1000, k=3: not a witness
+        assert!(!exact_check(1000, 3, &prime_data));
+
+        // But known witnesses must pass (cross-check with the other test)
+        assert!(exact_check(8178, 3, &prime_data));
+        assert!(exact_check(339949252, 8, &prime_data));
+    }
+
+    // -----------------------------------------------------------------------
+    // exact_check v_2 popcount path: the fast popcount check for p=2 must
+    // agree with a naive Legendre computation.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn exact_check_v2_popcount_agrees_with_legendre() {
+        let primes = sieve_primes(200_000_000);
+        let prime_data = build_prime_data(&primes);
+
+        // For a range of n values and k values, verify exact_check's boolean
+        // result is consistent: if the v_2 check rejects, a manual Legendre
+        // computation should also show the deficit.
+        for k in 1..=5u64 {
+            for n in (k + 2)..500 {
+                let result = exact_check(n, k, &prime_data);
+                // Manual v_2 check: v_2(prod) = sum of v_2(n-i) for i=0..k
+                let n_ones = n.count_ones() as u64;
+                let nk1_ones = (n - k - 1).count_ones() as u64;
+                let nu2_prod = nk1_ones.wrapping_sub(n_ones).wrapping_add(k + 1);
+                let v2_passes = n_ones >= nu2_prod;
+
+                if !v2_passes {
+                    assert!(
+                        !result,
+                        "n={}, k={}: v_2 check fails but exact_check passed",
+                        n, k
+                    );
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-block boundary: verify the solver finds witnesses regardless of
+    // where the search start places the witness relative to block boundaries.
+    // The witness at n=2480 (k=2) needs values [2478, 2479, 2480], so start
+    // must be <= 2478. We vary the start to shift which BLOCK_SIZE-aligned
+    // block the witness lands in.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn solve_finds_witnesses_near_block_boundaries() {
+        let primes = sieve_primes(200_000_000);
+        let prime_data = build_prime_data(&primes);
+
+        // Vary start so 2480 lands at different positions within a block
+        for start in [1u64, 2, 100, 2000, 2470, 2477, 2478] {
+            let (ans, _, _) = solve(2, start, 3000, &prime_data, 1, 0, false, 0.0);
+            assert_eq!(
+                ans, 2480,
+                "k=2 witness should be 2480 with start={}, got {}",
+                start, ans
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // const_vs_dynamic across ALL dispatched primes (3..97), not just p=7.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn const_vs_dynamic_all_dispatched_primes() {
+        let dispatched: &[u64] = &[
+            3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79,
+            83, 89, 97,
+        ];
+
+        let block_start: u64 = 10_000_000;
+        let block_size: u64 = 512;
+
+        for &p in dispatched {
+            let inv_p = mod_inverse_u64(p);
+            let max_quot = u64::MAX / p;
+
+            let mut rem_dyn = vec![0u64; block_size as usize];
+            for j in 0..block_size {
+                let x = block_start + j;
+                rem_dyn[j as usize] = x >> x.trailing_zeros();
+            }
+            let mut rem_const = rem_dyn.clone();
+
+            let mut sj_dyn = block_start % p;
+            if sj_dyn != 0 {
+                sj_dyn = p - sj_dyn;
+            }
+            let mut sj_const = sj_dyn;
+
+            // Dynamic path
+            process_prime_dyn(p, inv_p, max_quot, &mut sj_dyn, block_size, rem_dyn.as_mut_ptr());
+
+            // Const-generic path via macro-style dispatch
+            macro_rules! test_const {
+                ($($prime:literal),*) => {
+                    match p {
+                        $($prime => process_prime::<$prime>(&mut sj_const, block_size, rem_const.as_mut_ptr()),)*
+                        _ => unreachable!(),
+                    }
+                };
+            }
+            test_const!(
+                3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73,
+                79, 83, 89, 97
+            );
+
+            assert_eq!(sj_const, sj_dyn, "start_j diverged for p={}", p);
+            assert_eq!(
+                rem_const, rem_dyn,
+                "rem buffers diverged for p={}",
+                p
+            );
         }
     }
 }
