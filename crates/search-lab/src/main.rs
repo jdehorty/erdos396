@@ -758,6 +758,14 @@ const KNOWN_WITNESSES: &[(u64, u64)] = &[
 
 /// Verify a single (k, n) witness with a detailed per-prime report.
 fn verify_witness(k: u64, n: u64, prime_data: &[PrimeData]) -> bool {
+    if k == 0 || n <= k {
+        eprintln!(
+            "Error: --verify requires k >= 1 and n > k (got k={}, n={})",
+            k, n
+        );
+        return false;
+    }
+
     let two_k = 2 * k;
     let two_n = 2 * n;
     let mut all_pass = true;

@@ -1,9 +1,16 @@
 #!/bin/bash
 # PreToolUse hook: blocks git commit if cargo fmt or clippy fail.
-# Follows the official Claude Code hooks pattern from code.claude.com/docs/en/hooks
+# Only activates on git commit commands — skips everything else.
 
 # Consume stdin (required — Claude Code pipes JSON on stdin)
 INPUT=$(cat)
+
+# Only run on git commit commands
+COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+case "$COMMAND" in
+    git\ commit*) ;;
+    *) exit 0 ;;
+esac
 
 cd "$CLAUDE_PROJECT_DIR"
 
