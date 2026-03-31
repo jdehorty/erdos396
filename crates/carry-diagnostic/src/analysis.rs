@@ -101,7 +101,15 @@ pub fn analyze_prime(n: u64, m: u64, p: u64) -> PrimeAnalysis {
     let cascade_len = cascade_length(n, p, start_pos);
 
     PrimeAnalysis {
-        p, demand, supply, deficit, is_failing, top_supply, bonus, gap, cascade_len,
+        p,
+        demand,
+        supply,
+        deficit,
+        is_failing,
+        top_supply,
+        bonus,
+        gap,
+        cascade_len,
     }
 }
 
@@ -114,31 +122,34 @@ pub fn analyze_witness_condition(n: u64, k: u32, p: u64) -> WitnessAnalysis {
     let top_supply = vp_central_binom_dispatch(n, p);
     let witness_gap = total_demand as i64 - top_supply as i64;
 
-    WitnessAnalysis { p, total_demand, top_supply, witness_gap }
+    WitnessAnalysis {
+        p,
+        total_demand,
+        top_supply,
+        witness_gap,
+    }
 }
 
 /// Compute the full analysis of a near-miss block.
 pub fn analyze_near_miss(nm: &NearMiss, k: u32, sieve: &PrimeSieve) -> NearMissReport {
     let bp = barrier_primes(k);
 
-    let barrier_analysis: Vec<PrimeAnalysis> = bp.iter()
-        .map(|&p| analyze_prime(nm.n, nm.m, p))
-        .collect();
+    let barrier_analysis: Vec<PrimeAnalysis> =
+        bp.iter().map(|&p| analyze_prime(nm.n, nm.m, p)).collect();
 
-    let witness_analysis: Vec<WitnessAnalysis> = bp.iter()
+    let witness_analysis: Vec<WitnessAnalysis> = bp
+        .iter()
         .map(|&p| analyze_witness_condition(nm.n, k, p))
         .collect();
 
-    let failing_prime_count = barrier_analysis.iter()
-        .filter(|a| a.is_failing)
-        .count() as u32;
+    let failing_prime_count = barrier_analysis.iter().filter(|a| a.is_failing).count() as u32;
 
-    let compensated_count = barrier_analysis.iter()
+    let compensated_count = barrier_analysis
+        .iter()
         .filter(|a| a.is_failing && a.gap <= 0)
         .count() as u32;
 
-    let witness_gaps_all_nonpositive = witness_analysis.iter()
-        .all(|w| w.witness_gap <= 0);
+    let witness_gaps_all_nonpositive = witness_analysis.iter().all(|w| w.witness_gap <= 0);
 
     let pure_barrier_only = is_pure_barrier_failure(nm.m, k, sieve);
 
@@ -263,13 +274,13 @@ mod tests {
         // Proposition 2 tightness example: m=4, n=5, p=2
         let result = analyze_prime(5, 4, 2);
         assert_eq!(result.p, 2);
-        assert_eq!(result.demand, 2);    // v_2(4) = 2
-        assert_eq!(result.supply, 1);    // s_2(4) = popcount(4) = 1
+        assert_eq!(result.demand, 2); // v_2(4) = 2
+        assert_eq!(result.supply, 1); // s_2(4) = popcount(4) = 1
         assert_eq!(result.deficit, 1);
         assert!(result.is_failing);
         assert_eq!(result.top_supply, 2); // s_2(5) = popcount(5) = 2
         assert_eq!(result.bonus, 1);
-        assert_eq!(result.gap, 0);       // exactly compensated!
+        assert_eq!(result.gap, 0); // exactly compensated!
         assert_eq!(result.cascade_len, 1);
     }
 
@@ -392,6 +403,87 @@ mod tests {
                 2480 - i
             );
         }
+    }
+
+    #[test]
+    fn test_known_k3_non_governor_witness_analysis() {
+        // n=1441378 is a known k=3 non-governor witness.
+        // The block [n-3, n] should contain exactly one non-governor whose
+        // failures are confined to barrier primes (p < 2*3+1 = 7), i.e. {2, 3, 5}.
+        let n = 1_441_378u64;
+        let k = 3u32;
+        let sieve = erdos396::PrimeSieve::for_range(n + 100);
+        let checker = erdos396::GovernorChecker::with_sieve(sieve.clone());
+
+        // Find the non-governor in the block
+        let mut non_gov_pos = None;
+        for j in 0..=k {
+            let m = n - j as u64;
+            if !checker.is_governor_fast(m) {
+                assert!(
+                    non_gov_pos.is_none(),
+                    "Block should have exactly one non-governor"
+                );
+                non_gov_pos = Some(j);
+            }
+        }
+        let j = non_gov_pos.expect("Block must contain a non-governor");
+        let m = n - j as u64;
+
+        // Verify it's a pure barrier failure
+        assert!(
+            is_pure_barrier_failure(m, k, &sieve),
+            "k=3 non-governor witness m={m} should be a pure barrier failure"
+        );
+
+        // Full near-miss report
+        let nm = NearMiss { n, m, j };
+        let report = analyze_near_miss(&nm, k, &sieve);
+        assert!(report.pure_barrier_only);
+        assert!(
+            report.failing_prime_count > 0,
+            "Non-governor must fail at least one barrier prime"
+        );
+    }
+
+    #[test]
+    fn test_known_k4_non_governor_witness_analysis() {
+        // n=2366563 is a known k=4 non-governor witness.
+        // Barrier primes for k=4: {2, 3, 5, 7} (primes < 2*4+1 = 9).
+        let n = 2_366_563u64;
+        let k = 4u32;
+        let sieve = erdos396::PrimeSieve::for_range(n + 100);
+        let checker = erdos396::GovernorChecker::with_sieve(sieve.clone());
+
+        // Find the non-governor in the block
+        let mut non_gov_pos = None;
+        for j in 0..=k {
+            let m = n - j as u64;
+            if !checker.is_governor_fast(m) {
+                assert!(
+                    non_gov_pos.is_none(),
+                    "Block should have exactly one non-governor"
+                );
+                non_gov_pos = Some(j);
+            }
+        }
+        let j = non_gov_pos.expect("Block must contain a non-governor");
+        let m = n - j as u64;
+
+        // Verify it's a pure barrier failure
+        assert!(
+            is_pure_barrier_failure(m, k, &sieve),
+            "k=4 non-governor witness m={m} should be a pure barrier failure"
+        );
+
+        // Full near-miss report
+        let nm = NearMiss { n, m, j };
+        let report = analyze_near_miss(&nm, k, &sieve);
+        assert!(report.pure_barrier_only);
+        assert!(
+            report.failing_prime_count > 0,
+            "Non-governor must fail at least one barrier prime"
+        );
     }
 
     #[test]

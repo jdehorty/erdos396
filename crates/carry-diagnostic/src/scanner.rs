@@ -1,5 +1,5 @@
 use crate::analysis::{has_barrier_prime_failure, NearMiss};
-use crate::fast_sieve::{build_prime_data, fast_governor_sieve, is_governor_cold, strip_only_sieve, PrimeData};
+use crate::fast_sieve::{build_prime_data, is_governor_cold, strip_only_sieve, PrimeData};
 use erdos396::PrimeSieve;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,6 +131,7 @@ fn scan_chunk(
     let mut rem_fail_positions: Vec<usize> = Vec::with_capacity(k_usize + 2);
 
     // Initialize first window [0, k]
+    #[allow(clippy::needless_range_loop)]
     for i in 0..=k_usize {
         if i < len {
             let n = chunk_start + i as u64;
@@ -162,7 +163,9 @@ fn scan_chunk(
 
             // Verify all candidate positions are actual governors
             for i in window_left..=right {
-                if i == fail_idx { continue; }
+                if i == fail_idx {
+                    continue;
+                }
                 let val = chunk_start + i as u64;
                 if !is_governor_cold(val, prime_data) {
                     return; // Second non-governor → not a near-miss
@@ -309,6 +312,43 @@ mod tests {
 
         // n=40664 is the smallest k=2 non-governor witness — it should appear
         let has_40664 = results.iter().any(|nm| nm.n == 40664);
-        assert!(has_40664, "Should find the known k=2 non-governor witness at n=40664");
+        assert!(
+            has_40664,
+            "Should find the known k=2 non-governor witness at n=40664"
+        );
+    }
+
+    #[test]
+    fn test_scan_finds_known_k3_non_governor_witness() {
+        // n=1441378 is a known k=3 non-governor witness
+        let n = 1_441_378u64;
+        let k = 3u32;
+        let start = n - 500;
+        let count = 1000u64;
+        let sieve = PrimeSieve::for_range(start + count + 100);
+
+        let results = scan_near_misses(start, count, k, sieve.primes(), &sieve, false);
+        let found = results.iter().any(|nm| nm.n == n);
+        assert!(
+            found,
+            "Should find the known k=3 non-governor witness at n={n}"
+        );
+    }
+
+    #[test]
+    fn test_scan_finds_known_k4_non_governor_witness() {
+        // n=2366563 is a known k=4 non-governor witness
+        let n = 2_366_563u64;
+        let k = 4u32;
+        let start = n - 500;
+        let count = 1000u64;
+        let sieve = PrimeSieve::for_range(start + count + 100);
+
+        let results = scan_near_misses(start, count, k, sieve.primes(), &sieve, false);
+        let found = results.iter().any(|nm| nm.n == n);
+        assert!(
+            found,
+            "Should find the known k=4 non-governor witness at n={n}"
+        );
     }
 }

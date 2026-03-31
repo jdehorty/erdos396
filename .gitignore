@@ -41,10 +41,6 @@ Thumbs.db
 .vscode/
 *.iml
 
-# Claude Code / Codex tooling (not part of this project)
-.claude/
-.codex/
-
 # Environment and secrets
 .env
 .env.*
@@ -85,3 +81,6 @@ crates/search-lab/cpp-reference/checkpoint-396.txt
 crates/search-lab/cpp-reference/checkpoint-396.tmp
 crates/search-lab/cpp-reference/results-396.txt
 docs/superpowers
+
+# Claude Code artifacts
+.claude/scheduled_tasks.lock

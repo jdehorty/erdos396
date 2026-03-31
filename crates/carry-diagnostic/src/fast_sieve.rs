@@ -20,16 +20,16 @@ const BLOCK_MASK: u32 = 0x7FFF;
 #[repr(C)]
 pub struct PrimeData {
     // Hot fields first (used every strip iteration)
-    inv_p: u64,      // modular inverse of p mod 2^64 — for exact division
-    max_quot: u64,   // u64::MAX / p — divisibility threshold
+    inv_p: u64,    // modular inverse of p mod 2^64 — for exact division
+    max_quot: u64, // u64::MAX / p — divisibility threshold
     // Barrett fields (used for Kummer and offset computation)
     barrett_magic: u64, // ceil(2^(64+shift) / p) — for fast divmod
     barrett_shift: u8,  // bit_width(p) - 1
     // Prime value
     pub p: u64,
     // Kummer thresholds (precomputed for branchless carry logic)
-    half: u64,       // p / 2 (floor)
-    half_up: u64,    // ceil(p / 2)
+    half: u64,    // p / 2 (floor)
+    half_up: u64, // ceil(p / 2)
 }
 
 /// Compute modular inverse of odd n mod 2^64 via Newton's method.
@@ -78,9 +78,7 @@ fn kummer_barrett(n: u64, pd: &PrimeData) -> u64 {
 /// p=2 uses popcount (1 cycle).
 #[inline(always)]
 fn kummer_dispatch(n: u64, pd: &PrimeData) -> u64 {
-    use erdos396::governor::{
-        vp_central_binom_kummer_const, vp_central_binom_p2,
-    };
+    use erdos396::governor::{vp_central_binom_kummer_const, vp_central_binom_p2};
     match pd.p {
         2 => vp_central_binom_p2(n),
         3 => vp_central_binom_kummer_const::<3>(n),
@@ -132,8 +130,12 @@ fn barrett_offset(lo: u64, pd: &PrimeData) -> u64 {
     if lo == 0 {
         return pd.p;
     }
-    let (q, r) = barrett_divmod(lo, pd.p, pd.barrett_magic, pd.barrett_shift);
-    if r == 0 { 0 } else { pd.p - r }
+    let (_q, r) = barrett_divmod(lo, pd.p, pd.barrett_magic, pd.barrett_shift);
+    if r == 0 {
+        0
+    } else {
+        pd.p - r
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +153,9 @@ struct Bucket {
 
 impl Bucket {
     fn new() -> Self {
-        Bucket { data: Vec::with_capacity(256) }
+        Bucket {
+            data: Vec::with_capacity(256),
+        }
     }
     #[inline(always)]
     fn push(&mut self, pd_idx: u32, offset: u32) {
@@ -180,7 +184,9 @@ fn strip_prime_const<const P: u64>(
         inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
         inv
     }
-    const fn limit_const(p: u64) -> u64 { u64::MAX / p }
+    const fn limit_const(p: u64) -> u64 {
+        u64::MAX / p
+    }
 
     let inv = inv_const(P);
     let limit = limit_const(P);
@@ -199,7 +205,9 @@ fn strip_prime_const<const P: u64>(
                 let mut temp = q;
                 loop {
                     let q2 = temp.wrapping_mul(inv);
-                    if q2 > limit { break; }
+                    if q2 > limit {
+                        break;
+                    }
                     temp = q2;
                     exp += 1;
                 }
@@ -242,7 +250,9 @@ fn strip_prime_dyn_fused(
                 let mut temp = q;
                 loop {
                     let q2 = temp.wrapping_mul(pd.inv_p);
-                    if q2 > pd.max_quot { break; }
+                    if q2 > pd.max_quot {
+                        break;
+                    }
                     temp = q2;
                     exp += 1;
                 }
@@ -288,8 +298,8 @@ pub fn fast_governor_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec
     let sieve_limit = isqrt_2n(max_n);
 
     let total_primes = prime_data.partition_point(|pd| pd.p <= sieve_limit);
-    let first_large_idx = prime_data[..total_primes]
-        .partition_point(|pd| pd.p <= BLOCK_SIZE as u64);
+    let first_large_idx =
+        prime_data[..total_primes].partition_point(|pd| pd.p <= BLOCK_SIZE as u64);
 
     // Per-prime offsets using Barrett reduction (no hardware div)
     let mut prime_offsets = vec![0u64; total_primes];
@@ -305,15 +315,15 @@ pub fn fast_governor_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec
     let mut is_governor = vec![true; len];
 
     // Handle n <= 1
-    for i in 0..len {
+    for (i, gov) in is_governor.iter_mut().enumerate().take(len) {
         let n = lo + i as u64;
         if n <= 1 {
-            is_governor[i] = n == 1;
+            *gov = n == 1;
         }
     }
 
     // Bucket large primes by target block
-    let num_blocks = (len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    let num_blocks = len.div_ceil(BLOCK_SIZE);
     let num_buckets = num_blocks + 1;
     let mut buckets: Vec<Bucket> = (0..num_buckets).map(|_| Bucket::new()).collect();
 
@@ -340,9 +350,13 @@ pub fn fast_governor_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec
         let pd2 = &prime_data[0]; // p=2
         for i in 0..block_len {
             let gi = block_start + i;
-            if !is_governor[gi] { continue; }
+            if !is_governor[gi] {
+                continue;
+            }
             let n = block_lo + i as u64;
-            if n == 0 { continue; }
+            if n == 0 {
+                continue;
+            }
             let tz = n.trailing_zeros();
             rem[gi] = n >> tz;
             if tz > 0 {
@@ -365,9 +379,18 @@ pub fn fast_governor_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec
 
             if sj < block_len as u64 {
                 dispatch_strip_fused!(
-                    p, pd, &mut sj, block_len as u64, rem_ptr, gov_ptr, lo, block_start,
-                    [3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47,
-                     53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
+                    p,
+                    pd,
+                    &mut sj,
+                    block_len as u64,
+                    rem_ptr,
+                    gov_ptr,
+                    lo,
+                    block_start,
+                    [
+                        3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71,
+                        73, 79, 83, 89, 97
+                    ]
                 );
                 prime_offsets[idx] = sj;
             } else {
@@ -402,7 +425,9 @@ pub fn fast_governor_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec
 
                     let item = *b_ptr.add(i);
                     let ji = item.offset as usize;
-                    if !*gov_ptr.add(ji) { continue; }
+                    if !*gov_ptr.add(ji) {
+                        continue;
+                    }
                     let pd = &*pd_ptr.add(item.pd_idx as usize);
                     let r = *rem_ptr.add(ji);
                     let q = r.wrapping_mul(pd.inv_p);
@@ -411,7 +436,9 @@ pub fn fast_governor_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec
                         let mut temp = q;
                         loop {
                             let q2 = temp.wrapping_mul(pd.inv_p);
-                            if q2 > pd.max_quot { break; }
+                            if q2 > pd.max_quot {
+                                break;
+                            }
                             temp = q2;
                             exp += 1;
                         }
@@ -455,7 +482,9 @@ fn strip_only_const<const P: u64>(start_j: &mut u64, block_len: u64, rem: *mut u
         inv = inv.wrapping_mul(2u64.wrapping_sub(p.wrapping_mul(inv)));
         inv
     }
-    const fn limit_const(p: u64) -> u64 { u64::MAX / p }
+    const fn limit_const(p: u64) -> u64 {
+        u64::MAX / p
+    }
 
     let inv = inv_const(P);
     let limit = limit_const(P);
@@ -467,7 +496,9 @@ fn strip_only_const<const P: u64>(start_j: &mut u64, block_len: u64, rem: *mut u
             if temp <= limit {
                 loop {
                     let q = temp.wrapping_mul(inv);
-                    if q > limit { break; }
+                    if q > limit {
+                        break;
+                    }
                     temp = q;
                 }
                 *rem.add(j as usize) = temp;
@@ -479,7 +510,14 @@ fn strip_only_const<const P: u64>(start_j: &mut u64, block_len: u64, rem: *mut u
 }
 
 #[inline(always)]
-fn strip_only_dyn(inv_p: u64, max_quot: u64, p: u64, start_j: &mut u64, block_len: u64, rem: *mut u64) {
+fn strip_only_dyn(
+    inv_p: u64,
+    max_quot: u64,
+    p: u64,
+    start_j: &mut u64,
+    block_len: u64,
+    rem: *mut u64,
+) {
     let mut j = *start_j;
     while j < block_len {
         unsafe {
@@ -488,7 +526,9 @@ fn strip_only_dyn(inv_p: u64, max_quot: u64, p: u64, start_j: &mut u64, block_le
             if temp <= max_quot {
                 loop {
                     let q = temp.wrapping_mul(inv_p);
-                    if q > max_quot { break; }
+                    if q > max_quot {
+                        break;
+                    }
                     temp = q;
                 }
                 *rem.add(j as usize) = temp;
@@ -525,8 +565,8 @@ pub fn strip_only_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec<u6
     let sieve_limit = isqrt_2n(max_n);
 
     let total_primes = prime_data.partition_point(|pd| pd.p <= sieve_limit);
-    let first_large_idx = prime_data[..total_primes]
-        .partition_point(|pd| pd.p <= BLOCK_SIZE as u64);
+    let first_large_idx =
+        prime_data[..total_primes].partition_point(|pd| pd.p <= BLOCK_SIZE as u64);
 
     let mut prime_offsets = vec![0u64; total_primes];
     if total_primes > 0 {
@@ -539,7 +579,7 @@ pub fn strip_only_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec<u6
     let mut rem = vec![0u64; len];
 
     // Bucket large primes
-    let num_blocks = (len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    let num_blocks = len.div_ceil(BLOCK_SIZE);
     let mut buckets: Vec<Bucket> = (0..num_blocks + 1).map(|_| Bucket::new()).collect();
     for idx in first_large_idx..total_primes {
         let p = prime_data[idx].p;
@@ -564,9 +604,13 @@ pub fn strip_only_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec<u6
         for i in 0..block_len {
             let n = block_lo + i as u64;
             if n == 0 {
-                unsafe { *rem.as_mut_ptr().add(block_start + i) = 0; }
+                unsafe {
+                    *rem.as_mut_ptr().add(block_start + i) = 0;
+                }
             } else {
-                unsafe { *rem.as_mut_ptr().add(block_start + i) = n >> n.trailing_zeros(); }
+                unsafe {
+                    *rem.as_mut_ptr().add(block_start + i) = n >> n.trailing_zeros();
+                }
             }
         }
 
@@ -579,9 +623,15 @@ pub fn strip_only_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec<u6
             let mut sj = prime_offsets[idx];
             if sj < block_len as u64 {
                 dispatch_strip_only!(
-                    p, pd, &mut sj, block_len as u64, rem_ptr,
-                    [3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47,
-                     53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
+                    p,
+                    pd,
+                    &mut sj,
+                    block_len as u64,
+                    rem_ptr,
+                    [
+                        3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71,
+                        73, 79, 83, 89, 97
+                    ]
                 );
                 prime_offsets[idx] = sj;
             } else {
@@ -619,7 +669,9 @@ pub fn strip_only_sieve(lo: u64, len: usize, prime_data: &[PrimeData]) -> Vec<u6
                     if temp <= pd.max_quot {
                         loop {
                             let q = temp.wrapping_mul(pd.inv_p);
-                            if q > pd.max_quot { break; }
+                            if q > pd.max_quot {
+                                break;
+                            }
                             temp = q;
                         }
                         *rem_ptr.add(item.offset as usize) = temp;
@@ -657,8 +709,12 @@ pub fn is_governor_cold(n: u64, prime_data: &[PrimeData]) -> bool {
 
     // Odd primes
     for pd in &prime_data[1..] {
-        if pd.p > sieve_limit { break; }
-        if pd.p * pd.p > remaining { break; }
+        if pd.p > sieve_limit {
+            break;
+        }
+        if pd.p * pd.p > remaining {
+            break;
+        }
 
         let q = remaining.wrapping_mul(pd.inv_p);
         if q <= pd.max_quot {
@@ -666,7 +722,9 @@ pub fn is_governor_cold(n: u64, prime_data: &[PrimeData]) -> bool {
             let mut temp = q;
             loop {
                 let q2 = temp.wrapping_mul(pd.inv_p);
-                if q2 > pd.max_quot { break; }
+                if q2 > pd.max_quot {
+                    break;
+                }
                 temp = q2;
                 exp += 1;
             }
@@ -675,7 +733,9 @@ pub fn is_governor_cold(n: u64, prime_data: &[PrimeData]) -> bool {
             if exp > supply {
                 return false;
             }
-            if remaining == 1 { return true; }
+            if remaining == 1 {
+                return true;
+            }
         }
     }
 
@@ -711,8 +771,12 @@ pub fn is_governor_cold(n: u64, prime_data: &[PrimeData]) -> bool {
 fn isqrt_2n(n: u64) -> u64 {
     let two_n = 2u128 * n as u128;
     let mut x = (two_n as f64).sqrt() as u64;
-    while (x as u128) * (x as u128) > two_n { x -= 1; }
-    while ((x + 1) as u128) * ((x + 1) as u128) <= two_n { x += 1; }
+    while (x as u128) * (x as u128) > two_n {
+        x -= 1;
+    }
+    while ((x + 1) as u128) * ((x + 1) as u128) <= two_n {
+        x += 1;
+    }
     x
 }
 
@@ -734,7 +798,8 @@ mod tests {
     fn test_barrett_divmod() {
         let primes = erdos396::PrimeSieve::for_range(1000);
         let pd = build_prime_data(primes.primes());
-        for pdata in &pd[1..] { // skip p=2 (inv_p=0)
+        for pdata in &pd[1..] {
+            // skip p=2 (inv_p=0)
             let p = pdata.p;
             for &n in &[0u64, 1, p - 1, p, p + 1, 2 * p, 1000000007, 10000000000u64] {
                 let (q, r) = barrett_divmod(n, p, pdata.barrett_magic, pdata.barrett_shift);
@@ -772,14 +837,19 @@ mod tests {
         let primes = erdos396::PrimeSieve::for_range(lo + len as u64 + 100);
         let prime_data = build_prime_data(primes.primes());
 
-        let fused = FusedBatchResult::compute(lo, len, primes.primes());
+        let erdos_prime_data = erdos396::build_prime_data(primes.primes());
+        let fused = FusedBatchResult::compute(lo, len, &erdos_prime_data);
         let fast = fast_governor_sieve(lo, len, &prime_data);
 
-        for i in 0..len {
+        for (i, (f, g)) in fused.is_governor.iter().zip(fast.iter()).enumerate() {
             assert_eq!(
-                fused.is_governor[i], fast[i],
+                f,
+                g,
                 "Mismatch at lo+{}={}: fused={}, fast={}",
-                i, lo + i as u64, fused.is_governor[i], fast[i]
+                i,
+                lo + i as u64,
+                f,
+                g
             );
         }
     }
@@ -791,14 +861,19 @@ mod tests {
         let primes = erdos396::PrimeSieve::for_range(lo + len as u64 + 100);
         let prime_data = build_prime_data(primes.primes());
 
-        let fused = erdos396::prefilter::FusedBatchResult::compute(lo, len, primes.primes());
+        let erdos_prime_data = erdos396::build_prime_data(primes.primes());
+        let fused = erdos396::prefilter::FusedBatchResult::compute(lo, len, &erdos_prime_data);
         let fast = fast_governor_sieve(lo, len, &prime_data);
 
-        for i in 0..len {
+        for (i, (f, g)) in fused.is_governor.iter().zip(fast.iter()).enumerate() {
             assert_eq!(
-                fused.is_governor[i], fast[i],
+                f,
+                g,
                 "Mismatch at {}={}: fused={}, fast={}",
-                i, lo + i as u64, fused.is_governor[i], fast[i]
+                i,
+                lo + i as u64,
+                f,
+                g
             );
         }
     }

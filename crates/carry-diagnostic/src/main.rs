@@ -1,4 +1,5 @@
 mod analysis;
+#[allow(dead_code)] // fused sieve functions used in tests and benchmarking
 mod fast_sieve;
 mod scanner;
 
@@ -111,7 +112,11 @@ fn print_report(report: &NearMissReport) {
         .filter(|a| a.is_failing)
         .map(|a| a.p)
         .collect();
-    let purity = if report.pure_barrier_only { " [PURE]" } else { "" };
+    let purity = if report.pure_barrier_only {
+        " [PURE]"
+    } else {
+        ""
+    };
     println!(
         "Near-miss at n={}, m={} (j={}), fails at {:?}{}",
         nm.n, nm.m, nm.j, failing, purity
@@ -155,12 +160,12 @@ fn print_summary(reports: &[NearMissReport], start: u64, count: u64, k: u32) {
     let bp = barrier_primes(k);
 
     println!("---");
-    println!(
-        "Scanned {} integers starting at {} (k={})",
-        count, start, k
-    );
+    println!("Scanned {} integers starting at {} (k={})", count, start, k);
     let pure_count = reports.iter().filter(|r| r.pure_barrier_only).count();
-    println!("Near-misses found: {} ({} pure barrier-only)", total, pure_count);
+    println!(
+        "Near-misses found: {} ({} pure barrier-only)",
+        total, pure_count
+    );
 
     if total > 0 {
         let worst = reports
@@ -194,10 +199,8 @@ fn print_summary(reports: &[NearMissReport], start: u64, count: u64, k: u32) {
         }
 
         // Per-prime compensation frequency
-        let reports_with_failures: usize = reports
-            .iter()
-            .filter(|r| r.failing_prime_count > 0)
-            .count();
+        let reports_with_failures: usize =
+            reports.iter().filter(|r| r.failing_prime_count > 0).count();
         if reports_with_failures > 0 {
             let mut compensated_by_prime: Vec<(u64, usize)> = Vec::new();
             let mut never_compensated: Vec<u64> = Vec::new();
