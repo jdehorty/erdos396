@@ -90,23 +90,21 @@ pub fn near_witnesses(rng: &mut impl Rng) -> Vec<TestCase> {
     let mut cases = Vec::new();
     for &(k, witness_n) in known {
         for delta in -100..=100i64 {
-            let n = (witness_n as i64 + delta).max(k as i64 + 1) as u64;
-            // Test at the known k and also at k-1, k+1
-            cases.push(TestCase {
-                k,
-                n,
-                generator: "near_witness",
-            });
-            if k > 1 {
+            // Test at the known k and also at k-1, k+1.
+            // Each variant must independently satisfy n > k (exact_check precondition).
+            let test_ks: &[u32] = if k > 1 && k < 14 {
+                &[k - 1, k, k + 1]
+            } else if k > 1 {
+                &[k - 1, k]
+            } else if k < 14 {
+                &[k, k + 1]
+            } else {
+                &[k]
+            };
+            for &test_k in test_ks {
+                let n = (witness_n as i64 + delta).max(test_k as i64 + 1) as u64;
                 cases.push(TestCase {
-                    k: k - 1,
-                    n,
-                    generator: "near_witness",
-                });
-            }
-            if k < 14 {
-                cases.push(TestCase {
-                    k: k + 1,
+                    k: test_k,
                     n,
                     generator: "near_witness",
                 });
@@ -207,26 +205,28 @@ pub fn false_positives() -> Vec<TestCase> {
 }
 
 /// Generate all test cases for a given tier.
+///
+/// Always includes deterministic regression cases (near-witnesses, false positives).
+/// The `count` parameter controls additional targeted + uniform random cases.
 pub fn generate_tier(seed: u64, count: usize, max_n: u64) -> Vec<TestCase> {
     use rand::SeedableRng;
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
 
     let mut all = Vec::new();
 
-    // Deterministic cases first
+    // Deterministic regression cases (always included regardless of count)
     all.extend(near_witnesses(&mut rng));
     all.extend(false_positives());
 
-    // 4 targeted generators + uniform random = 5 equal shares
-    let remaining = count.saturating_sub(all.len());
-    let per_gen = remaining / 5;
+    // 4 targeted generators + uniform random = 5 equal shares of `count`
+    let per_gen = count / 5;
 
     all.extend(block_boundary(&mut rng, per_gen));
     all.extend(chunk_boundary(&mut rng, per_gen));
     all.extend(smooth_numbers(&mut rng, per_gen));
     all.extend(prime_powers(&mut rng, per_gen));
-    // Fill remainder with uniform random
-    let uniform_count = count.saturating_sub(all.len());
+    // Fill remainder of `count` with uniform random
+    let uniform_count = count.saturating_sub(per_gen * 4);
     all.extend(uniform_random(&mut rng, uniform_count, max_n));
 
     all
