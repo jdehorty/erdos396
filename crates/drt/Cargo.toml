@@ -1,0 +1,15 @@
+[package]
+name = "erdos396-drt"
+version = "0.1.0"
+edition = "2021"
+description = "Cedar-style differential random testing for Erdős Problem #396"
+license = "MIT"
+
+[dependencies]
+erdos396 = { path = "../erdos396" }
+erdos396-search-lab = { path = "../search-lab", features = ["drt"] }
+rand = { version = "0.8", features = ["small_rng"] }
+rand_chacha = "0.3"
+
+[features]
+default = []

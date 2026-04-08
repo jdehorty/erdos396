@@ -2,6 +2,9 @@
 //
 // Build: cargo build --release
 
+// When built as a library (for DRT), binary-only items appear unused.
+#![cfg_attr(feature = "drt", allow(dead_code))]
+
 use std::fs;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -1167,6 +1170,107 @@ fn main() {
 
     if bench_secs <= 0.0 {
         let _ = fs::remove_file("checkpoint.txt");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DRT exports — feature-gated wrappers for differential random testing.
+// Zero-cost in production (compiled out when `drt` feature is not active).
+// ---------------------------------------------------------------------------
+#[cfg(feature = "drt")]
+pub mod drt_exports {
+    use super::*;
+
+    pub const DRT_BLOCK_SIZE: u32 = BLOCK_SIZE;
+    pub const DRT_CHUNK_SIZE: u64 = CHUNK_SIZE;
+
+    /// Precomputed context for DRT queries. Build once, reuse for all checks.
+    pub struct DrtContext {
+        primes: Vec<Prime>,
+        prime_data: Vec<PrimeData>,
+    }
+
+    impl DrtContext {
+        pub fn new(sieve_limit: usize) -> Self {
+            let primes = sieve_primes(sieve_limit);
+            let prime_data = build_prime_data(&primes);
+            Self { primes, prime_data }
+        }
+
+        pub fn exact_check(&self, n: u64, k: u64) -> bool {
+            exact_check(n, k, &self.prime_data)
+        }
+
+        pub fn primes(&self) -> &[u64] {
+            &self.primes
+        }
+
+        pub fn prime_data_count(&self) -> usize {
+            self.prime_data.len()
+        }
+    }
+
+    /// PrimeData re-exported for DRT.
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    pub struct DrtPrimeData {
+        pub inv_p: u64,
+        pub max_quot: u64,
+        pub magic: u64,
+        pub p: u64,
+        pub shift: u8,
+    }
+
+    pub fn drt_known_witnesses() -> &'static [(u64, u64)] {
+        KNOWN_WITNESSES
+    }
+
+    pub fn drt_mod_inverse_u64(n: u64) -> u64 {
+        mod_inverse_u64(n)
+    }
+
+    pub fn drt_isqrt_u64(n: u64) -> u64 {
+        isqrt_u64(n)
+    }
+
+    pub fn drt_sieve_primes(limit: usize) -> Vec<u64> {
+        sieve_primes(limit)
+    }
+
+    pub fn drt_build_prime_data(primes: &[u64]) -> Vec<DrtPrimeData> {
+        build_prime_data(primes)
+            .into_iter()
+            .map(|pd| DrtPrimeData {
+                inv_p: pd.inv_p,
+                max_quot: pd.max_quot,
+                magic: pd.magic,
+                p: pd.p,
+                shift: pd.shift,
+            })
+            .collect()
+    }
+
+    /// Barrett quotient: floor(n / p) using precomputed magic constants.
+    pub fn drt_barrett_quotient(n: u64, magic: u64, shift: u8) -> u64 {
+        (((n as u128).wrapping_mul(magic as u128)) >> 64) as u64 >> shift as u64
+    }
+
+    /// Process a single prime dynamically: strip all factors of p from rem buffer.
+    pub fn drt_process_prime_dyn(
+        p: u64,
+        inv_p: u64,
+        max_quot: u64,
+        start_j: &mut u64,
+        w_block: u64,
+        rem: &mut [u64],
+    ) {
+        assert!(
+            w_block as usize <= rem.len(),
+            "w_block ({}) exceeds rem length ({})",
+            w_block,
+            rem.len()
+        );
+        process_prime_dyn(p, inv_p, max_quot, start_j, w_block, rem.as_mut_ptr());
     }
 }
 

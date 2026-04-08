@@ -4,3 +4,14 @@ version = "0.1.0"
 edition = "2021"
 description = "High-performance witness search and verification for Erdős Problem #396"
 license = "MIT"
+
+[lib]
+name = "erdos396_search_lab"
+path = "src/main.rs"
+
+[[bin]]
+name = "erdos396-search-lab"
+path = "src/main.rs"
+
+[features]
+drt = []
